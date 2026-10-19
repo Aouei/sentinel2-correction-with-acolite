@@ -14,6 +14,8 @@ from src.roi import hash_roi
 ASSET_FOLDER = "projects/ee-sergiohercar1/assets/ETL"
 ASSET_HASH_LENGTH = 12  # the full hashes live in the database; the asset name stays short
 POLL_SECONDS = 10
+TASK_TIMEOUT_SECONDS = 30 * 60  # a stuck export (e.g. READY in a saturated queue) must not block a batch
+MAX_STATUS_ERRORS = 5  # consecutive failed reads of the task status before giving up
 CREDENTIAL_KEYS = frozenset({"EARTHDATA_u", "EARTHDATA_p"})
 
 
@@ -45,11 +47,13 @@ class Pipeline:
         extract: Callable[[date, str, dict[str, Any]], Any],
         transform: Callable[[Any, AcoliteConfig], Any],
         load: Callable[[Any, str, dict[str, Any]], Any],
+        asset_exists: Callable[[str], bool],
         db: DBConnection,
     ) -> None:
         self._extract = extract
         self._transform = transform
         self._load = load
+        self._asset_exists = asset_exists
         self._db = db
 
     def run(
@@ -70,12 +74,22 @@ class Pipeline:
 
         self._db.register_scene(date, tile, gee_id)
 
+        # The asset id is deterministic and Earth Engine never overwrites: if a previous run lost
+        # its export (crash, Ctrl-C, locked database) the asset exists anyway, so adopt it.
+        asset_id = _asset_id(date, tile, config, roi)
+        try:
+            already_exported = self._asset_exists(asset_id)
+        except Exception as error:
+            return self._fail("load", error, date, tile, config, roi)
+        if already_exported:
+            self._db.mark_corrected(date, tile, config, roi, asset_id)
+            return RunStatus.SUCCESS
+
         try:
             corrected = self._transform(image, config)
         except Exception as error:
             return self._fail("transform", error, date, tile, config, roi)
 
-        asset_id = _asset_id(date, tile, config, roi)
         try:
             task = self._load(corrected, asset_id, roi)
             _wait_until_completed(task)
@@ -110,11 +124,40 @@ def _describe(error: Exception) -> str:
 
 
 def _wait_until_completed(task: Any) -> None:
-    while True:
-        status = task.status()
-        state = status["state"]
-        if state == "COMPLETED":
-            return
-        if state in ("FAILED", "CANCELLED"):
-            raise ExportError(status.get("error_message") or state)
-        time.sleep(POLL_SECONDS)
+    """Poll the export task. Tolerates transient read errors, times out, cancels on Ctrl-C."""
+    waited = 0
+    failed_reads = 0
+    try:
+        while True:
+            try:
+                status = task.status()
+            except Exception as error:
+                failed_reads += 1
+                if failed_reads >= MAX_STATUS_ERRORS:
+                    raise ExportError(
+                        f"could not read the task status {failed_reads} times in a row: {_describe(error)}"
+                    ) from error
+            else:
+                failed_reads = 0
+                state = status["state"]
+                if state == "COMPLETED":
+                    return
+                if state in ("FAILED", "CANCELLED"):
+                    raise ExportError(status.get("error_message") or state)
+
+            if waited >= TASK_TIMEOUT_SECONDS:
+                _cancel_quietly(task)
+                raise ExportError(f"timed out after {waited} s waiting for the export task")
+            time.sleep(POLL_SECONDS)
+            waited += POLL_SECONDS
+    except KeyboardInterrupt:
+        # Do not leave an orphan export that would create the asset behind our back.
+        _cancel_quietly(task)
+        raise
+
+
+def _cancel_quietly(task: Any) -> None:
+    try:
+        task.cancel()
+    except Exception:
+        pass

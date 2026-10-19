@@ -31,16 +31,28 @@ class FakeImage:
 
 
 class FakeTask:
-    """Stands in for ee.batch.Task: `.status()["state"]` walks through `states`."""
+    """Stands in for ee.batch.Task.
+
+    `.status()["state"]` walks through `states`; an exception instance in `states` is raised
+    instead. The last item repeats forever.
+    """
 
     def __init__(self, states, events):
         self.states = list(states)
         self.events = events
+        self.cancelled = False
 
     def status(self):
-        state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
-        self.events.append(f"status:{state}")
-        return {"state": state, "error_message": "export exploded"}
+        item = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        if isinstance(item, BaseException):
+            self.events.append("status:error")
+            raise item
+        self.events.append(f"status:{item}")
+        return {"state": item, "error_message": "export exploded"}
+
+    def cancel(self):
+        self.cancelled = True
+        self.events.append("cancel")
 
 
 class FakeDB:
@@ -89,6 +101,10 @@ class Steps:
         self.transform_error = None
         self.load_error = None
         self.no_image = False
+        self.tasks = []
+        self.existing_assets = set()
+        self.asset_exists_calls = []
+        self.asset_exists_error = None
 
     def extract(self, date, tile, roi):
         self.events.append("extract")
@@ -109,7 +125,16 @@ class Steps:
         self.load_calls.append((image, asset_id, roi))
         if self.load_error:
             raise self.load_error
-        return FakeTask(self.task_states, self.events)
+        task = FakeTask(self.task_states, self.events)
+        self.tasks.append(task)
+        return task
+
+    def asset_exists(self, asset_id):
+        self.events.append("asset_exists")
+        self.asset_exists_calls.append(asset_id)
+        if self.asset_exists_error:
+            raise self.asset_exists_error
+        return asset_id in self.existing_assets
 
 
 @pytest.fixture(autouse=True)
@@ -134,7 +159,13 @@ def fake_db(events):
 
 
 def build(steps, db):
-    return Pipeline(extract=steps.extract, transform=steps.transform, load=steps.load, db=db)
+    return Pipeline(
+        extract=steps.extract,
+        transform=steps.transform,
+        load=steps.load,
+        asset_exists=steps.asset_exists,
+        db=db,
+    )
 
 
 def expected_asset_id(config, roi=ROI):
@@ -247,6 +278,7 @@ def test_steps_run_in_order_and_corrected_is_marked_last(steps, fake_db, events,
     assert events == [
         "extract",
         "register_scene",
+        "asset_exists",
         "transform",
         "load",
         "status:COMPLETED",
@@ -447,3 +479,121 @@ def test_the_same_roi_with_another_key_order_does_not_trigger_reprocessing(event
 
     assert len(steps.extract_calls) == 1
     assert len(steps.load_calls) == 1
+
+
+# --- a lost export must not block the next run --------------------------------
+
+
+def test_the_asset_check_uses_the_deterministic_asset_id(steps, fake_db, config):
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.asset_exists_calls == [expected_asset_id(config)]
+
+
+def test_an_existing_asset_is_marked_corrected_without_exporting_again(steps, fake_db, config):
+    steps.existing_assets = {expected_asset_id(config)}
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert steps.transform_calls == []
+    assert steps.load_calls == []
+    assert fake_db.marked_corrected == [(DAY, TILE, config, ROI, expected_asset_id(config))]
+
+
+def test_the_asset_is_not_checked_when_there_is_no_image(steps, fake_db, config):
+    steps.no_image = True
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.asset_exists_calls == []
+
+
+def test_the_asset_is_not_checked_when_it_is_already_corrected(steps, fake_db, config):
+    fake_db.corrected = True
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.asset_exists_calls == []
+
+
+def test_an_error_checking_the_asset_is_a_load_failure(steps, fake_db, config):
+    steps.asset_exists_error = RuntimeError("gee down")
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert steps.transform_calls == []
+    assert fake_db.marked_error == [(DAY, TILE, config, ROI)]
+    [(step, message, *_rest)] = fake_db.logged_errors
+    assert step == "load"
+    assert "gee down" in message
+
+
+def test_a_lost_export_is_adopted_on_the_next_run(events, db, config):
+    steps = Steps(events, task_states=("FAILED",))
+    pipeline = build(steps, db)
+    assert pipeline.run(DAY, TILE, config, ROI) is RunStatus.FAIL
+
+    steps.existing_assets = {expected_asset_id(config)}  # the export finished anyway
+
+    assert pipeline.run(DAY, TILE, config, ROI) is RunStatus.SUCCESS
+    assert len(steps.transform_calls) == 1  # it was not corrected a second time
+    assert db.is_corrected(DAY, TILE, config, ROI) is True
+
+
+# --- waiting for the export task is resilient --------------------------------
+
+
+def test_transient_errors_reading_the_task_are_retried(events, fake_db, config):
+    flaky = ConnectionError("503")
+    steps = Steps(events, task_states=(flaky, flaky, "RUNNING", "COMPLETED"))
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert fake_db.marked_corrected == [(DAY, TILE, config, ROI, expected_asset_id(config))]
+
+
+def test_the_error_counter_resets_after_a_good_read(events, fake_db, config):
+    flaky = ConnectionError("503")
+    states = (flaky,) * 4 + ("RUNNING",) + (flaky,) * 4 + ("COMPLETED",)
+    steps = Steps(events, task_states=states)
+
+    assert build(steps, fake_db).run(DAY, TILE, config, ROI) is RunStatus.SUCCESS
+
+
+def test_too_many_consecutive_errors_reading_the_task_are_a_load_failure(events, fake_db, config):
+    steps = Steps(events, task_states=(ConnectionError("503 unavailable"),))
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert fake_db.marked_corrected == []
+    [(step, message, *_rest)] = fake_db.logged_errors
+    assert step == "load"
+    assert "503 unavailable" in message
+
+
+def test_a_task_that_never_finishes_is_cancelled_after_the_timeout(events, fake_db, config, monkeypatch):
+    monkeypatch.setattr("src.pipeline.TASK_TIMEOUT_SECONDS", 30)
+    steps = Steps(events, task_states=("READY",))
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert steps.tasks[0].cancelled is True
+    assert fake_db.marked_corrected == []
+    [(step, message, *_rest)] = fake_db.logged_errors
+    assert step == "load"
+    assert "timed out" in message
+
+
+def test_interrupting_the_wait_cancels_the_task_and_propagates(events, fake_db, config):
+    steps = Steps(events, task_states=(KeyboardInterrupt(),))
+
+    with pytest.raises(KeyboardInterrupt):
+        build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.tasks[0].cancelled is True
+    assert fake_db.marked_corrected == []
