@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import date
 
 from src.ddbb.connection import DBConnection
@@ -264,3 +265,57 @@ def test_mark_error_is_kept_per_roi(db, raw_db, config):
     db.mark_error(DAY, TILE, config, OTHER_ROI)
 
     assert len(corrected_rows(raw_db)) == 2
+
+
+# --- the traceback column ----------------------------------------------------
+
+
+def test_log_error_stores_the_traceback(db, raw_db):
+    trace = "Traceback (most recent call last):\n  File \"x.py\", line 1\nValueError: boom"
+
+    db.log_error("transform", "boom", DAY, TILE, traceback=trace)
+
+    assert raw_db.execute("SELECT traceback FROM errors").fetchone() == (trace,)
+
+
+def test_the_traceback_is_optional(db, raw_db):
+    db.log_error("extract", "gee down", DAY, TILE)
+
+    assert raw_db.execute("SELECT traceback FROM errors").fetchone() == (None,)
+
+
+def test_a_database_created_before_the_traceback_column_is_migrated(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scene_id INTEGER,
+            date TEXT NOT NULL,
+            tile TEXT NOT NULL,
+            ac_version TEXT,
+            params_hash TEXT,
+            step TEXT NOT NULL,
+            error_msg TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+        INSERT INTO errors (date, tile, step, error_msg) VALUES ('2018-09-19', 'T29SPA', 'extract', 'old error');
+        """
+    )
+    old.commit()
+    old.close()
+
+    DBConnection(path).log_error("load", "new error", DAY, TILE, traceback="trace")
+
+    migrated = sqlite3.connect(path)
+    columns = [row[1] for row in migrated.execute("PRAGMA table_info(errors)")]
+    rows = migrated.execute("SELECT error_msg, traceback FROM errors ORDER BY id").fetchall()
+    migrated.close()
+    assert "traceback" in columns
+    assert rows == [("old error", None), ("new error", "trace")]
+
+
+def test_opening_the_database_twice_does_not_fail_on_the_migration(db_path):
+    DBConnection(db_path)
+    DBConnection(db_path)

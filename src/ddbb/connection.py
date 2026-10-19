@@ -25,6 +25,7 @@ class DBConnection:
         self._path = Path(path)
         with self._connect() as connection:
             connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+            self._migrate(connection)
 
     def register_scene(self, date: date, tile: str, gee_id: str) -> None:
         with self._connect() as connection:
@@ -84,11 +85,12 @@ class DBConnection:
         date: date,
         tile: str,
         config: "AcoliteConfig | None" = None,
+        traceback: str | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO errors (scene_id, date, tile, ac_version, params_hash, step, error_msg) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO errors (scene_id, date, tile, ac_version, params_hash, step, error_msg, traceback) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     self._find_scene_id(connection, date, tile),
                     date.isoformat(),
@@ -97,8 +99,16 @@ class DBConnection:
                     config.hash() if config else None,
                     step,
                     message,
+                    traceback,
                 ),
             )
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """CREATE TABLE IF NOT EXISTS never alters a table: add the columns older databases lack."""
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(errors)")}
+        if "traceback" not in columns:
+            connection.execute("ALTER TABLE errors ADD COLUMN traceback TEXT")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

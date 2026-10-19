@@ -53,5 +53,8 @@ CREATE TABLE IF NOT EXISTS errors (
     params_hash  TEXT,
     step         TEXT    NOT NULL CHECK (step IN ('extract', 'transform', 'load')),
     error_msg    TEXT    NOT NULL,
-    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- Python traceback of the failure. NULL when unavailable and for rows written before this
+    -- column existed (DBConnection adds it to older databases).
+    traceback    TEXT
 );
