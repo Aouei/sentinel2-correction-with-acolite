@@ -562,6 +562,32 @@ def test_save_scene_metadata_refuses_an_image_that_is_not_the_registered_one(db,
     ]
 
 
+def test_kept_image_instead_of_returns_the_registered_id_when_it_has_metadata(db):
+    db.register_scene(DAY, TILE, GEE_ID)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+
+    assert db.kept_image_instead_of(DAY, TILE, GEE_ID + "_other") == GEE_ID
+
+
+def test_kept_image_instead_of_is_none_for_the_same_image_short_or_full(db):
+    short_id = GEE_ID.rsplit("/", 1)[-1]
+    db.register_scene(DAY, TILE, short_id)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+
+    assert db.kept_image_instead_of(DAY, TILE, GEE_ID) is None
+    assert db.kept_image_instead_of(DAY, TILE, short_id) is None
+
+
+def test_kept_image_instead_of_is_none_without_stored_metadata(db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    assert db.kept_image_instead_of(DAY, TILE, GEE_ID + "_other") is None
+
+
+def test_kept_image_instead_of_is_none_for_an_unregistered_scene(db):
+    assert db.kept_image_instead_of(DAY, TILE, GEE_ID) is None
+
+
 def test_save_scene_metadata_accepts_the_short_and_the_full_gee_id(db, raw_db):
     short_id = GEE_ID.rsplit("/", 1)[-1]
     db.register_scene(DAY, TILE, short_id)  # the database keeps the short system:index

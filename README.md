@@ -88,8 +88,10 @@ FROM scene_metadata AS m JOIN scenes AS s ON s.id = m.scene_id;
 ```
 
 New runs record the metadata at extract time, sharing the Earth Engine call that reads the image id.
-A scene keeps the first image registered for it: metadata of a different image is refused and the
-scene is marked as error instead of being overwritten.
+A scene keeps the first image registered for it. If a later run finds a different image for a scene
+that already has its metadata (e.g. a reprocessed product), the registered image and its metadata are
+kept: nothing is processed or overwritten, no error is recorded, a warning names both ids and the run
+counts as done. Metadata of a different image is never written over a registered one.
 Scenes processed before the table existed are filled with:
 
 ```bash

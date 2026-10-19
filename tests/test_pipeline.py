@@ -1,3 +1,4 @@
+import logging
 import time
 
 import pytest
@@ -56,6 +57,7 @@ class FakeDB:
         self.saved_metadata = []
         self.saved_metadata_gee_ids = []
         self.save_metadata_error = None
+        self.kept_image = False
         self.marked_corrected = []
         self.marked_error = []
         self.logged_errors = []
@@ -68,6 +70,9 @@ class FakeDB:
     def register_scene(self, date, tile, gee_id):
         self.events.append("register_scene")
         self.registered.append((date, tile, gee_id))
+
+    def kept_image_instead_of(self, date, tile, gee_id):
+        return GEE_ID if self.kept_image else None
 
     def save_scene_metadata(self, date, tile, properties, *, gee_id):
         self.events.append("save_scene_metadata")
@@ -279,8 +284,8 @@ def test_the_metadata_is_saved_against_the_gee_id_of_the_described_image(steps, 
     assert fake_db.saved_metadata_gee_ids == [GEE_ID]
 
 
-def test_an_image_other_than_the_registered_one_is_an_error_and_keeps_the_stored_metadata(
-    events, db, raw_db, config
+def test_a_different_image_than_the_registered_one_is_skipped_keeping_what_we_have(
+    events, db, raw_db, config, caplog
 ):
     steps = Steps(events)
     pipeline = build(steps, db)
@@ -288,14 +293,46 @@ def test_an_image_other_than_the_registered_one_is_an_error_and_keeps_the_stored
     steps.image = FakeImage(gee_id=GEE_ID + "_replacement")
     steps.properties = {**PROPERTIES, "PRODUCT_ID": "S2A_MSIL1C_replacement"}
     steps.load_calls.clear()
+    steps.transform_calls.clear()
     raw_db.execute("DELETE FROM corrected")  # force a new attempt
     raw_db.commit()
 
-    status = pipeline.run(DAY, TILE, config, ROI)
+    with caplog.at_level(logging.WARNING):
+        status = pipeline.run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert steps.load_calls == [] and steps.transform_calls == []
+    assert raw_db.execute("SELECT product_id FROM scene_metadata").fetchall() == [("S2B_MSIL1C_x",)]
+    assert raw_db.execute("SELECT gee_id FROM scenes").fetchall() == [(GEE_ID,)]
+    assert raw_db.execute("SELECT COUNT(*) FROM errors").fetchone() == (0,)
+    assert raw_db.execute("SELECT COUNT(*) FROM corrected WHERE status = 'error'").fetchone() == (0,)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert GEE_ID in warnings[0].getMessage() and "_replacement" in warnings[0].getMessage()
+
+
+def test_a_different_image_with_stored_metadata_marks_nothing_in_the_fake_db(
+    steps, fake_db, config
+):
+    fake_db.kept_image = True
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert fake_db.saved_metadata == []
+    assert fake_db.marked_error == [] and fake_db.logged_errors == []
+    assert steps.transform_calls == [] and steps.load_calls == []
+
+
+def test_a_different_image_without_stored_metadata_is_still_refused(events, db, raw_db, config):
+    steps = Steps(events, image=FakeImage(gee_id=GEE_ID + "_replacement"))
+    db.register_scene(DAY, TILE, GEE_ID)  # registered with another image, never given metadata
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
 
     assert status is RunStatus.FAIL
     assert steps.load_calls == []
-    assert raw_db.execute("SELECT product_id FROM scene_metadata").fetchall() == [("S2B_MSIL1C_x",)]
+    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (0,)
     assert "_replacement" in raw_db.execute("SELECT error_msg FROM errors").fetchone()[0]
 
 

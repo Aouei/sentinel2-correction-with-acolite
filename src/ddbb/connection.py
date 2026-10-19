@@ -78,6 +78,22 @@ class DBConnection:
                 (scene_id, *columns.values()),
             )
 
+    def kept_image_instead_of(self, date: date, tile: str, gee_id: str) -> str | None:
+        """The registered gee_id when the scene already has stored metadata for another image than `gee_id`.
+
+        None otherwise (same image, no stored metadata, or scene not registered). The short and the
+        full (`COPERNICUS/S2_HARMONIZED/...`) forms of an id match.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT s.gee_id FROM scenes AS s JOIN scene_metadata AS m ON m.scene_id = s.id "
+                "WHERE s.date = ? AND s.tile = ? AND s.gee_id IS NOT NULL",
+                (date.isoformat(), tile),
+            ).fetchone()
+        if row is None or _short_id(row[0]) == _short_id(gee_id):
+            return None
+        return row[0]
+
     def scenes_without_metadata(self) -> list[tuple[date, str, str]]:
         """(date, tile, gee_id) of every scene with an image and no scene_metadata row, oldest first."""
         with self._connect() as connection:
