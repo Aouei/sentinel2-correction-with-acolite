@@ -23,5 +23,8 @@ settings.json
 settings.txt
 .env
 
+# Logs of the batch runs
+logs/
+
 # Tooling caches
 .atl/
