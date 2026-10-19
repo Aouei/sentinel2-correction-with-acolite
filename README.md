@@ -49,6 +49,14 @@ run_formosa_2018.bat
 
 Rough time: days without an image take a few seconds; each image takes about two minutes.
 
+## Viewing a result in Earth Engine
+
+`gee/psdb_viewer.js` is a Code Editor script that draws one band of a processed scene (`pSDB_green` by
+default) with the viridis palette from 0.8 to 1.5 and a color bar. Open
+<https://code.earthengine.google.com>, paste the file and press Run. Change `ASSET_ID`, `BAND`, `MIN`
+and `MAX` in its CONFIG block to look at another scene or range. It is plain Earth Engine JavaScript,
+so it is not part of the Python package and the tests do not run it.
+
 ## Running the tests
 
 The project is built with TDD: tests are written first, so a failing test is expected until its
