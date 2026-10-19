@@ -93,3 +93,7 @@ uv run pytest --collect-only -q
 
 The tests do not need Google Earth Engine, ACOLITE or network access: the pipeline steps are
 replaced by fakes and the database is a temporary SQLite file.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).

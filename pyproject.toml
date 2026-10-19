@@ -3,6 +3,8 @@ name = "sentinel2-correction-with-acolite"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "gee-acolite",
