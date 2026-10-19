@@ -41,6 +41,9 @@ run_formosa_2018.bat
   so a missing prerequisite fails once instead of 365 times.
 - One log per date in `logs\T29SPA_<year>\<date>.log`, and `failed.txt` with the dates that failed and
   their exit code. The `.bat` exits with `1` if any date failed.
+- Every searched date is recorded in the `scenes` table: `gee_id` NULL means Earth Engine has no image
+  that day, and a date with no row at all was never searched. For example, list the empty days with
+  `SELECT date FROM scenes WHERE gee_id IS NULL`.
 - Optional environment variables: `YEAR` (default `2018`), `LIMIT` (only the first N dates) and
   `DRY_RUN=1` (print the commands without running them).
 
