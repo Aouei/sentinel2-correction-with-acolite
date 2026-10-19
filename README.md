@@ -20,8 +20,10 @@ uv run python main.py \
   to it, so a different ROI (like a different ACOLITE version or settings) counts as a new correction.
 - Only `Rrs_B1`..`Rrs_B7`, `TUR_Nechad2016_665`, `chl_oc3`, `pSDB_green` and `pSDB_red` are exported.
 - `--db` is optional (default `state.db`).
-- Exit code `0` = `SUCCESS`, `1` = `FAIL`, `2` = invalid input files.
-- The first run opens the Earth Engine authentication flow if you are not logged in yet.
+- Exit code `0` = `SUCCESS`, `1` = `FAIL`, `2` = invalid input files, `3` = Earth Engine unavailable
+  (not logged in or offline).
+- Log in to Earth Engine once with `uv run earthengine authenticate` before the first run. The CLI
+  never opens an interactive login, so an unattended batch cannot hang.
 - Re-running the same date, tile and settings does nothing: the pipeline is idempotent.
 
 ## Running the tests
