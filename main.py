@@ -10,6 +10,7 @@ import ee
 
 from src.ddbb.connection import DBConnection
 from src.pipeline import AcoliteConfig, Pipeline, RunStatus
+from src.steps.assets import asset_exists
 from src.steps.extract import extract
 from src.steps.load import load
 from src.steps.transform import transform
@@ -64,17 +65,27 @@ def load_roi(path: Path) -> dict[str, Any]:
     return geometry
 
 
+class EarthEngineInitError(Exception):
+    """Earth Engine could not be initialized (not logged in, offline, wrong project...)."""
+
+
 def build_pipeline(db_path: Path) -> Pipeline:
     _initialize_earth_engine()
-    return Pipeline(extract=extract, transform=transform, load=load, db=DBConnection(db_path))
+    return Pipeline(
+        extract=extract,
+        transform=transform,
+        load=load,
+        asset_exists=asset_exists,
+        db=DBConnection(db_path),
+    )
 
 
 def _initialize_earth_engine() -> None:
+    # Never authenticate here: an interactive login would hang an unattended batch.
     try:
         ee.Initialize(project=EE_PROJECT)
-    except Exception:
-        ee.Authenticate()
-        ee.Initialize(project=EE_PROJECT)
+    except Exception as error:
+        raise EarthEngineInitError(f"could not initialize Earth Engine: {error}") from error
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,7 +98,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     config = AcoliteConfig(version=args.acolite_version, path=args.acolite_path, params=params)
-    status = build_pipeline(args.db).run(args.date, args.tile, config, roi)
+    try:
+        pipeline = build_pipeline(args.db)
+    except EarthEngineInitError as error:
+        print(f"error: {error}", file=sys.stderr)
+        print("If you are not logged in, run `earthengine authenticate` once and try again.", file=sys.stderr)
+        return 3
+
+    status = pipeline.run(args.date, args.tile, config, roi)
     print(status.value)
     return 0 if status is RunStatus.SUCCESS else 1
 

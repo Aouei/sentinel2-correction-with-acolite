@@ -241,20 +241,29 @@ def test_build_pipeline_initializes_earth_engine_for_the_project(monkeypatch, tm
     assert calls == [{"project": "ee-sergiohercar1"}]
 
 
-def test_build_pipeline_authenticates_when_the_first_initialize_fails(monkeypatch, tmp_path):
+def test_build_pipeline_raises_a_clear_error_when_earth_engine_cannot_be_initialized(monkeypatch, tmp_path):
     attempts = []
 
     def initialize(**kwargs):
-        attempts.append("initialize")
-        if len(attempts) == 1:
-            raise RuntimeError("not authenticated")
+        raise RuntimeError("offline")
 
     fake_ee = SimpleNamespace(Initialize=initialize, Authenticate=lambda: attempts.append("authenticate"))
     monkeypatch.setattr(cli, "ee", fake_ee)
 
-    cli.build_pipeline(tmp_path / "state.db")
+    with pytest.raises(cli.EarthEngineInitError, match="offline"):
+        cli.build_pipeline(tmp_path / "state.db")
 
-    assert attempts == ["initialize", "authenticate", "initialize"]
+    assert attempts == []  # never opens an interactive login, so a batch cannot hang
+
+
+def test_main_returns_3_when_earth_engine_is_not_available(files, monkeypatch, capsys):
+    def unavailable(db_path):
+        raise cli.EarthEngineInitError("offline")
+
+    monkeypatch.setattr(cli, "build_pipeline", unavailable)
+
+    assert cli.main(make_argv(files)) == 3
+    assert "earthengine authenticate" in capsys.readouterr().err
 
 
 def test_build_pipeline_returns_a_pipeline_backed_by_the_database(monkeypatch, tmp_path):
