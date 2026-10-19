@@ -70,10 +70,11 @@ class Pipeline:
             self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
             return RunStatus.FAIL
 
+        # Record the attempt even without image: a row with gee_id NULL means "searched, Earth
+        # Engine has nothing", while no row at all means the date was never searched.
+        self._db.register_scene(date, tile, gee_id)
         if image is None:
             return RunStatus.SUCCESS
-
-        self._db.register_scene(date, tile, gee_id)
 
         # The asset id is deterministic and Earth Engine never overwrites: if a previous run lost
         # its export (crash, Ctrl-C, locked database) the asset exists anyway, so adopt it.

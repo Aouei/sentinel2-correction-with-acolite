@@ -214,14 +214,14 @@ def test_no_image_for_the_date_ends_successfully(steps, fake_db, config):
     assert build(steps, fake_db).run(DAY, TILE, config, ROI) is RunStatus.SUCCESS
 
 
-def test_no_image_runs_no_further_step_and_writes_nothing(steps, fake_db, config):
+def test_no_image_runs_no_further_step_and_only_records_the_attempt(steps, fake_db, config):
     steps.no_image = True
 
     build(steps, fake_db).run(DAY, TILE, config, ROI)
 
     assert steps.transform_calls == []
     assert steps.load_calls == []
-    assert fake_db.registered == []
+    assert fake_db.registered == [(DAY, TILE, None)]  # searched: Earth Engine has no image
     assert fake_db.marked_corrected == []
     assert fake_db.marked_error == []
     assert fake_db.logged_errors == []
@@ -664,3 +664,54 @@ def test_the_traceback_is_persisted_with_the_error(events, db, raw_db, config):
 
     [(text,)] = raw_db.execute("SELECT traceback FROM errors").fetchall()
     assert_traceback(text, "ValueError", "acolite crashed")
+
+
+# --- a date without image is a recorded attempt --------------------------------
+
+
+def scene_rows(raw_db):
+    return raw_db.execute("SELECT date, tile, gee_id FROM scenes").fetchall()
+
+
+def test_a_date_without_image_is_recorded_with_a_null_gee_id(events, db, raw_db, config):
+    steps = Steps(events)
+    steps.no_image = True
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert scene_rows(raw_db) == [(DAY.isoformat(), TILE, None)]
+
+
+def test_searching_a_date_without_image_again_keeps_a_single_row(events, db, raw_db, config):
+    steps = Steps(events)
+    steps.no_image = True
+    pipeline = build(steps, db)
+
+    pipeline.run(DAY, TILE, config, ROI)
+    pipeline.run(DAY, TILE, config, ROI)
+
+    assert scene_rows(raw_db) == [(DAY.isoformat(), TILE, None)]
+
+
+def test_an_image_that_shows_up_later_fills_the_null_gee_id(events, db, raw_db, config):
+    steps = Steps(events)
+    steps.no_image = True
+    pipeline = build(steps, db)
+    pipeline.run(DAY, TILE, config, ROI)
+
+    steps.no_image = False
+    status = pipeline.run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert scene_rows(raw_db) == [(DAY.isoformat(), TILE, GEE_ID)]
+    assert db.is_corrected(DAY, TILE, config, ROI) is True
+
+
+def test_a_failed_search_leaves_no_row_because_the_date_was_not_really_tried(events, db, raw_db, config):
+    steps = Steps(events)
+    steps.extract_error = RuntimeError("gee down")
+
+    build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert scene_rows(raw_db) == []
