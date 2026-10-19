@@ -26,6 +26,26 @@ uv run python main.py \
   never opens an interactive login, so an unattended batch cannot hang.
 - Re-running the same date, tile and settings does nothing: the pipeline is idempotent.
 
+## Running a whole year
+
+`run_formosa_2018.bat` runs the ETL for every day of 2018 on tile `T29SPA` with `roi.json`:
+
+```bat
+run_formosa_2018.bat
+```
+
+- Every date runs in its own process, so a failure on one date never stops or affects the others.
+- It is safe to re-run: dates that are already corrected finish in seconds without touching Earth
+  Engine, and dates that failed are retried.
+- Before the loop it checks `uv`, the input files, the ACOLITE folder and the Earth Engine login,
+  so a missing prerequisite fails once instead of 365 times.
+- One log per date in `logs\T29SPA_<year>\<date>.log`, and `failed.txt` with the dates that failed and
+  their exit code. The `.bat` exits with `1` if any date failed.
+- Optional environment variables: `YEAR` (default `2018`), `LIMIT` (only the first N dates) and
+  `DRY_RUN=1` (print the commands without running them).
+
+Rough time: days without an image take a few seconds; each image takes about two minutes.
+
 ## Running the tests
 
 The project is built with TDD: tests are written first, so a failing test is expected until its
