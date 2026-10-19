@@ -488,7 +488,7 @@ def test_creates_the_scene_metadata_table(raw_db):
 def test_save_scene_metadata_stores_the_typed_columns(db, raw_db):
     db.register_scene(DAY, TILE, GEE_ID)
 
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
 
     assert raw_db.execute(f"SELECT {METADATA_COLUMNS} FROM scene_metadata").fetchall() == [
         (
@@ -508,7 +508,7 @@ def test_save_scene_metadata_stores_the_typed_columns(db, raw_db):
 def test_save_scene_metadata_links_the_scene_one_to_one(db, raw_db):
     db.register_scene(DAY, TILE, GEE_ID)
 
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
 
     scene_id = raw_db.execute("SELECT id FROM scenes").fetchone()[0]
     assert raw_db.execute("SELECT scene_id FROM scene_metadata").fetchall() == [(scene_id,)]
@@ -517,7 +517,7 @@ def test_save_scene_metadata_links_the_scene_one_to_one(db, raw_db):
 def test_the_raw_properties_are_queryable_json(db, raw_db):
     db.register_scene(DAY, TILE, GEE_ID)
 
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
 
     row = raw_db.execute(
         "SELECT properties ->> '$.NODATA_PIXEL_PERCENTAGE', json_extract(properties, '$.PROCESSING_BASELINE') "
@@ -529,24 +529,56 @@ def test_the_raw_properties_are_queryable_json(db, raw_db):
 def test_save_scene_metadata_is_idempotent(db, raw_db):
     db.register_scene(DAY, TILE, GEE_ID)
 
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
 
     assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (1,)
 
 
 def test_save_scene_metadata_refreshes_the_existing_row(db, raw_db):
     db.register_scene(DAY, TILE, GEE_ID)
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
 
-    db.save_scene_metadata(DAY, TILE, {**SOURCE_PROPERTIES, "PROCESSING_BASELINE": "05.12"})
+    db.save_scene_metadata(DAY, TILE, {**SOURCE_PROPERTIES, "PROCESSING_BASELINE": "05.12"}, gee_id=GEE_ID)
 
     assert raw_db.execute("SELECT processing_baseline FROM scene_metadata").fetchall() == [("05.12",)]
 
 
 def test_save_scene_metadata_needs_a_registered_scene(db):
     with pytest.raises(LookupError):
-        db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+        db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+
+
+def test_save_scene_metadata_refuses_an_image_that_is_not_the_registered_one(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+    other = {**SOURCE_PROPERTIES, "PRODUCT_ID": "S2A_MSIL1C_other", "PROCESSING_BASELINE": "09.99"}
+
+    with pytest.raises(ValueError, match="other_image"):
+        db.save_scene_metadata(DAY, TILE, other, gee_id="COPERNICUS/S2_HARMONIZED/other_image")
+
+    assert raw_db.execute("SELECT product_id, processing_baseline FROM scene_metadata").fetchall() == [
+        (SOURCE_PROPERTIES["PRODUCT_ID"], "05.11")
+    ]
+
+
+def test_save_scene_metadata_accepts_the_short_and_the_full_gee_id(db, raw_db):
+    short_id = GEE_ID.rsplit("/", 1)[-1]
+    db.register_scene(DAY, TILE, short_id)  # the database keeps the short system:index
+
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=short_id)
+
+    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (1,)
+
+
+def test_save_scene_metadata_refuses_a_scene_registered_without_image(db, raw_db):
+    db.register_scene(DAY, TILE, None)
+
+    with pytest.raises(ValueError):
+        db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
+
+    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (0,)
 
 
 def test_a_failed_save_leaves_no_row(db, raw_db):
@@ -554,7 +586,7 @@ def test_a_failed_save_leaves_no_row(db, raw_db):
     incomplete = {key: value for key, value in SOURCE_PROPERTIES.items() if key != "PRODUCT_ID"}
 
     with pytest.raises(ValueError):
-        db.save_scene_metadata(DAY, TILE, incomplete)
+        db.save_scene_metadata(DAY, TILE, incomplete, gee_id=GEE_ID)
 
     assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (0,)
 
@@ -584,7 +616,7 @@ def test_scenes_without_metadata_lists_only_scenes_with_image_and_no_row(db):
     db.register_scene(DAY, TILE, GEE_ID)
     db.register_scene(date(2026, 9, 22), TILE, GEE_ID + "_done")
     db.register_scene(date(2026, 9, 23), TILE, None)
-    db.save_scene_metadata(date(2026, 9, 22), TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(date(2026, 9, 22), TILE, SOURCE_PROPERTIES, gee_id=GEE_ID + "_done")
 
     assert db.scenes_without_metadata() == [(DAY, TILE, GEE_ID)]
 

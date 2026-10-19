@@ -36,7 +36,7 @@ def backfill(db: DBConnection, fetch: Callable[[str], dict[str, Any]]) -> Backfi
     result = BackfillResult()
     for day, tile, gee_id in db.scenes_without_metadata():
         try:
-            db.save_scene_metadata(day, tile, fetch(gee_id))
+            db.save_scene_metadata(day, tile, fetch(gee_id), gee_id=gee_id)
         except Exception as error:
             result.failed.append((day, tile, gee_id, f"{type(error).__name__}: {error}"))
         else:

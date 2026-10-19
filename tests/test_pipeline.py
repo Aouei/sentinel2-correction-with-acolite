@@ -54,6 +54,7 @@ class FakeDB:
         self.is_corrected_calls = []
         self.registered = []
         self.saved_metadata = []
+        self.saved_metadata_gee_ids = []
         self.save_metadata_error = None
         self.marked_corrected = []
         self.marked_error = []
@@ -68,11 +69,12 @@ class FakeDB:
         self.events.append("register_scene")
         self.registered.append((date, tile, gee_id))
 
-    def save_scene_metadata(self, date, tile, properties):
+    def save_scene_metadata(self, date, tile, properties, *, gee_id):
         self.events.append("save_scene_metadata")
         if self.save_metadata_error:
             raise self.save_metadata_error
         self.saved_metadata.append((date, tile, properties))
+        self.saved_metadata_gee_ids.append(gee_id)
 
     def mark_corrected(self, date, tile, config, roi, asset_id):
         self.events.append("mark_corrected")
@@ -269,6 +271,32 @@ def test_the_source_image_properties_are_saved_for_the_scene(steps, fake_db, con
     build(steps, fake_db).run(DAY, TILE, config, ROI)
 
     assert fake_db.saved_metadata == [(DAY, TILE, PROPERTIES)]
+
+
+def test_the_metadata_is_saved_against_the_gee_id_of_the_described_image(steps, fake_db, config):
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert fake_db.saved_metadata_gee_ids == [GEE_ID]
+
+
+def test_an_image_other_than_the_registered_one_is_an_error_and_keeps_the_stored_metadata(
+    events, db, raw_db, config
+):
+    steps = Steps(events)
+    pipeline = build(steps, db)
+    pipeline.run(DAY, TILE, config, ROI)
+    steps.image = FakeImage(gee_id=GEE_ID + "_replacement")
+    steps.properties = {**PROPERTIES, "PRODUCT_ID": "S2A_MSIL1C_replacement"}
+    steps.load_calls.clear()
+    raw_db.execute("DELETE FROM corrected")  # force a new attempt
+    raw_db.commit()
+
+    status = pipeline.run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert steps.load_calls == []
+    assert raw_db.execute("SELECT product_id FROM scene_metadata").fetchall() == [("S2B_MSIL1C_x",)]
+    assert "_replacement" in raw_db.execute("SELECT error_msg FROM errors").fetchone()[0]
 
 
 def test_metadata_is_saved_right_after_registering_the_scene(steps, fake_db, config, events):

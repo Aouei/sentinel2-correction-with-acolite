@@ -79,7 +79,7 @@ class Pipeline:
         if image is None:
             return RunStatus.SUCCESS
         try:
-            self._db.save_scene_metadata(date, tile, properties)
+            self._db.save_scene_metadata(date, tile, properties, gee_id=gee_id)
         except Exception as error:  # e.g. an image without PRODUCT_ID: do not export what we cannot describe
             # The scene is already registered: leave a visible error state, not a silent half-done one.
             self._db.log_error(

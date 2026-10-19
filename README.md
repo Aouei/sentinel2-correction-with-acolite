@@ -87,6 +87,8 @@ FROM scene_metadata AS m JOIN scenes AS s ON s.id = m.scene_id;
 ```
 
 New runs record the metadata at extract time, sharing the Earth Engine call that reads the image id.
+A scene keeps the first image registered for it: metadata of a different image is refused and the
+scene is marked as error instead of being overwritten.
 Scenes processed before the table existed are filled with:
 
 ```bash

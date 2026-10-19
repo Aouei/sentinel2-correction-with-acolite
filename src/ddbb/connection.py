@@ -16,6 +16,11 @@ SCHEMA_PATH = Path(__file__).resolve().parents[2] / "sql" / "schema.sql"
 NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
 
+def _short_id(gee_id: str) -> str:
+    """The database keeps the short system:index; Earth Engine also reports `COLLECTION/index`."""
+    return gee_id.rsplit("/", 1)[-1]
+
+
 class DBConnection:
     """Service layer over the SQLite state: each method is a business rule.
 
@@ -42,11 +47,18 @@ class DBConnection:
                 (date.isoformat(), tile, gee_id),
             )
 
-    def save_scene_metadata(self, date: date, tile: str, properties: dict[str, Any]) -> None:
+    def save_scene_metadata(
+        self, date: date, tile: str, properties: dict[str, Any], *, gee_id: str
+    ) -> None:
         """Store the Sentinel-2 L1C image properties of a registered scene (typed columns + raw JSON).
 
+        `gee_id` is the id of the image the properties belong to: it must be the one registered for
+        the scene, because `register_scene` never replaces a known id and the metadata must not
+        describe another image. The short and the full (`COPERNICUS/S2_HARMONIZED/...`) forms match.
+
         Idempotent: saving again refreshes the row. Raises ValueError when the properties lack a
-        mandatory field (nothing is written) and LookupError when the scene is not registered.
+        mandatory field or the image is not the registered one (nothing is written) and
+        LookupError when the scene is not registered.
         """
         columns = scene_metadata_columns(properties)
         names = ", ".join(columns)
@@ -54,6 +66,12 @@ class DBConnection:
         refresh = ", ".join(f"{name} = excluded.{name}" for name in columns)
         with self._connect() as connection:
             scene_id = self._require_scene_id(connection, date, tile)
+            (registered,) = connection.execute("SELECT gee_id FROM scenes WHERE id = ?", (scene_id,)).fetchone()
+            if registered is None or _short_id(registered) != _short_id(gee_id):
+                raise ValueError(
+                    f"the metadata describes image {gee_id}, but {date.isoformat()} {tile} "
+                    f"is registered with image {registered}"
+                )
             connection.execute(
                 f"INSERT INTO scene_metadata (scene_id, {names}) VALUES (?, {marks}) "
                 f"ON CONFLICT (scene_id) DO UPDATE SET {refresh}",

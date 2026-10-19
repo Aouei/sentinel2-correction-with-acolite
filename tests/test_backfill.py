@@ -73,7 +73,7 @@ def test_running_it_again_fetches_and_inserts_nothing(db, raw_db, scenes):
 
 
 def test_scenes_that_already_have_metadata_are_not_fetched(db, scenes):
-    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES, gee_id=GEE_ID)
     fetch = FakeFetcher()
 
     backfill(db, fetch)
