@@ -80,11 +80,41 @@ def test_returns_the_first_image(spy, images):
     assert extract(DAY, TILE, ROI) is images[0]
 
 
-def test_returns_the_first_image_when_there_is_more_than_one(monkeypatch, images):
+def test_returns_the_most_recent_product_when_the_day_has_more_than_one(monkeypatch):
+    older = FakeImage("older", {"GENERATION_TIME": 1523539296000})
+    newer = FakeImage("newer", {"GENERATION_TIME": 1523540318000})
     monkeypatch.setattr(extract_module, "ee", FakeEE)
-    monkeypatch.setattr(extract_module, "search", SearchSpy(FakeCollection(images)))
+    monkeypatch.setattr(extract_module, "search", SearchSpy(FakeCollection([older, newer])))
 
-    assert extract(DAY, TILE, ROI) is images[0]
+    assert extract(DAY, TILE, ROI) is newer
+
+
+def test_the_most_recent_product_wins_whatever_the_order_of_the_search(monkeypatch):
+    older = FakeImage("older", {"GENERATION_TIME": 1523539296000})
+    newer = FakeImage("newer", {"GENERATION_TIME": 1523540318000})
+    monkeypatch.setattr(extract_module, "ee", FakeEE)
+    monkeypatch.setattr(extract_module, "search", SearchSpy(FakeCollection([newer, older])))
+
+    assert extract(DAY, TILE, ROI) is newer
+
+
+def test_sorts_by_generation_time_descending(monkeypatch):
+    collection = FakeCollection([FakeImage("a"), FakeImage("b")])
+    monkeypatch.setattr(extract_module, "ee", FakeEE)
+    monkeypatch.setattr(extract_module, "search", SearchSpy(collection))
+
+    extract(DAY, TILE, ROI)
+
+    assert collection.sort_calls == [("GENERATION_TIME", False)]
+
+
+def test_does_not_sort_when_there_is_no_image(monkeypatch):
+    collection = FakeCollection([])
+    monkeypatch.setattr(extract_module, "ee", FakeEE)
+    monkeypatch.setattr(extract_module, "search", SearchSpy(collection))
+
+    assert extract(DAY, TILE, ROI) is None
+    assert collection.sort_calls == []
 
 
 def test_returns_none_when_there_is_no_image(monkeypatch):
