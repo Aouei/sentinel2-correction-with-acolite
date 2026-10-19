@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# ACOLITE
+*data
+
+# Pipeline state database (and SQLite's journal / WAL sidecar files)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local ACOLITE settings (contains Earthdata credentials)
+settings.json
+settings.txt
+.env
+
+# Tooling caches
+.atl/

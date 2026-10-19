@@ -1,0 +1,29 @@
+[project]
+name = "sentinel2-correction-with-acolite"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gee-acolite",
+    "gdal",
+]
+
+[[tool.uv.index]]
+name = "geospatial-wheels"
+url = "https://gisidx.github.io/gwi"
+explicit = true
+
+[tool.uv.sources]
+gee-acolite = { git = "https://github.com/Aouei/gee_acolite.git" }
+gdal = { index = "geospatial-wheels" }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
