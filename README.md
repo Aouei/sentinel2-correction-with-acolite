@@ -36,7 +36,7 @@ flowchart LR
     P --> E["Extract<br/>search scene in GEE"]
     E --> T["Transform<br/>ACOLITE (DSF, L2W)"]
     T --> L["Load<br/>export asset to GEE"]
-    E -.-> DB[("SQLite<br/>scenes · corrected · errors")]
+    E -.-> DB[("SQLite<br/>scenes · scene_metadata · corrected · errors")]
     T -.-> DB
     L -.-> DB
     L --> A[("GEE asset")]
@@ -72,10 +72,29 @@ A correction is uniquely identified by:
 | Table | Purpose |
 | --- | --- |
 | `scenes` | One row per searched `(date, tile)`. `gee_id` is `NULL` when Earth Engine has no image that day; no row means the date was never searched. |
+| `scene_metadata` | One row per scene with an image (none for dates without image): the source Sentinel-2 L1C properties. Typed columns (`product_id`, `spacecraft`, `processing_baseline`, `orbit`, `acquired_at`, cloud percentages, mean solar angles) plus `properties`, every raw property as JSON. |
 | `corrected` | One row per correction attempt, with status `corrected` or `error` and the resulting asset id. |
 | `errors` | Append-only log of failures with step (`extract`, `transform`, `load`), message and traceback. |
 
 The schema is defined in [`sql/schema.sql`](sql/schema.sql) and created automatically on first use.
+Opening an older database adds the missing `scene_metadata` table without touching its data.
+
+The raw properties are queryable with SQLite's JSON functions:
+
+```sql
+SELECT s.date, m.spacecraft, m.cloudy_pixel_percentage, m.properties ->> '$.NODATA_PIXEL_PERCENTAGE'
+FROM scene_metadata AS m JOIN scenes AS s ON s.id = m.scene_id;
+```
+
+New runs record the metadata at extract time, sharing the Earth Engine call that reads the image id.
+Scenes processed before the table existed are filled with:
+
+```bash
+uv run python scripts/backfill_scene_metadata.py --db state.db
+```
+
+It only fetches scenes that still lack metadata, so it is safe to re-run; scenes that fail are
+reported and retried next time (exit code `1`; `2` database not found, `3` Earth Engine unavailable).
 
 ## Requirements
 
@@ -168,9 +187,11 @@ of a processed scene (`pSDB_green` by default) with a viridis palette and a colo
 main.py                  CLI entry point and dependency wiring
 src/pipeline.py          Orchestration, asset ids, export polling
 src/roi.py               ROI hashing
-src/steps/               Extract, transform, load and asset-existence steps
+src/steps/               Extract, describe, transform, load and asset-existence steps
+src/scene_metadata.py    Source image properties to scene_metadata columns
 src/ddbb/connection.py   SQLite service layer
 sql/schema.sql           Database schema
+scripts/                 One-off maintenance scripts (metadata backfill)
 gee/psdb_viewer.js       Earth Engine visualization script
 tests/                   Test suite and fakes
 ```
