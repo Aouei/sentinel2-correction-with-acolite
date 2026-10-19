@@ -1,4 +1,3 @@
-import logging
 import time
 
 import pytest
@@ -57,7 +56,7 @@ class FakeDB:
         self.saved_metadata = []
         self.saved_metadata_gee_ids = []
         self.save_metadata_error = None
-        self.kept_image = False
+        self.registered_id = None
         self.marked_corrected = []
         self.marked_error = []
         self.logged_errors = []
@@ -71,8 +70,8 @@ class FakeDB:
         self.events.append("register_scene")
         self.registered.append((date, tile, gee_id))
 
-    def kept_image_instead_of(self, date, tile, gee_id):
-        return GEE_ID if self.kept_image else None
+    def registered_gee_id(self, date, tile):
+        return self.registered_id
 
     def save_scene_metadata(self, date, tile, properties, *, gee_id):
         self.events.append("save_scene_metadata")
@@ -103,6 +102,8 @@ class Steps:
         self.image = FakeImage() if image is None else image
         self.task_states = task_states
         self.extract_calls = []
+        self.load_image_calls = []
+        self.load_image_error = None
         self.describe_calls = []
         self.describe_error = None
         self.properties = PROPERTIES
@@ -124,6 +125,13 @@ class Steps:
         if self.extract_error:
             raise self.extract_error
         return None if self.no_image else self.image
+
+    def load_image(self, gee_id):
+        self.events.append("load_image")
+        self.load_image_calls.append(gee_id)
+        if self.load_image_error:
+            raise self.load_image_error
+        return FakeImage("loaded", gee_id)
 
     def describe(self, image):
         self.events.append("describe")
@@ -180,6 +188,7 @@ def fake_db(events):
 def build(steps, db):
     return Pipeline(
         extract=steps.extract,
+        load_image=steps.load_image,
         describe=steps.describe,
         transform=steps.transform,
         load=steps.load,
@@ -284,56 +293,136 @@ def test_the_metadata_is_saved_against_the_gee_id_of_the_described_image(steps, 
     assert fake_db.saved_metadata_gee_ids == [GEE_ID]
 
 
-def test_a_different_image_than_the_registered_one_is_skipped_keeping_what_we_have(
-    events, db, raw_db, config, caplog
-):
+def corrected_rows(raw_db):
+    return raw_db.execute("SELECT status FROM corrected ORDER BY id").fetchall()
+
+
+def test_a_registered_image_is_loaded_by_id_and_the_search_is_not_repeated(events, db, raw_db, config):
+    steps = Steps(events, image=FakeImage(gee_id=GEE_ID + "_replacement"))  # a search would find B
+    db.register_scene(DAY, TILE, GEE_ID)  # registered with A, never corrected
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert steps.extract_calls == []
+    assert steps.load_image_calls == [GEE_ID]
+    assert [image.gee_id for image in steps.describe_calls] == [GEE_ID]
+    assert [image.name for image, _config in steps.transform_calls] == ["loaded"]
+    assert len(steps.load_calls) == 1
+    assert corrected_rows(raw_db) == [("corrected",)]
+    assert raw_db.execute("SELECT gee_id FROM scenes").fetchall() == [(GEE_ID,)]
+    assert raw_db.execute("SELECT COUNT(*) FROM errors").fetchone() == (0,)
+    assert raw_db.execute("SELECT product_id FROM scene_metadata").fetchall() == [("S2B_MSIL1C_x",)]
+
+
+def test_a_registered_image_is_processed_under_a_new_config(events, db, raw_db, config):
+    steps = Steps(events)
+    pipeline = build(steps, db)
+    other = AcoliteConfig(version="20240101.0", path=config.path, params=config.params)
+    pipeline.run(DAY, TILE, config, ROI)
+
+    status = pipeline.run(DAY, TILE, other, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert len(steps.extract_calls) == 1
+    assert steps.load_image_calls == [GEE_ID]
+    assert len(steps.load_calls) == 2
+    assert corrected_rows(raw_db) == [("corrected",), ("corrected",)]
+    assert db.is_corrected(DAY, TILE, other, ROI) is True
+    assert raw_db.execute("SELECT COUNT(*) FROM errors").fetchone() == (0,)
+
+
+def test_a_registered_image_already_corrected_neither_searches_nor_loads(events, db, config):
     steps = Steps(events)
     pipeline = build(steps, db)
     pipeline.run(DAY, TILE, config, ROI)
-    steps.image = FakeImage(gee_id=GEE_ID + "_replacement")
-    steps.properties = {**PROPERTIES, "PRODUCT_ID": "S2A_MSIL1C_replacement"}
-    steps.load_calls.clear()
-    steps.transform_calls.clear()
-    raw_db.execute("DELETE FROM corrected")  # force a new attempt
-    raw_db.commit()
 
-    with caplog.at_level(logging.WARNING):
-        status = pipeline.run(DAY, TILE, config, ROI)
+    status = pipeline.run(DAY, TILE, config, ROI)
 
     assert status is RunStatus.SUCCESS
-    assert steps.load_calls == [] and steps.transform_calls == []
-    assert raw_db.execute("SELECT product_id FROM scene_metadata").fetchall() == [("S2B_MSIL1C_x",)]
+    assert len(steps.extract_calls) == 1
+    assert steps.load_image_calls == []
+    assert len(steps.load_calls) == 1
+
+
+def test_a_scene_without_image_is_searched_again(events, db, raw_db, config):
+    steps = Steps(events)
+    db.register_scene(DAY, TILE, None)  # searched before: Earth Engine had nothing
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert steps.extract_calls == [(DAY, TILE, ROI)]
+    assert steps.load_image_calls == []
     assert raw_db.execute("SELECT gee_id FROM scenes").fetchall() == [(GEE_ID,)]
+
+
+def test_a_registered_image_with_saved_metadata_keeps_processing_consistently(events, db, raw_db, config):
+    steps = Steps(events)
+    db.register_scene(DAY, TILE, GEE_ID)
+    db.save_scene_metadata(DAY, TILE, PROPERTIES, gee_id=GEE_ID)
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert raw_db.execute("SELECT product_id FROM scene_metadata").fetchall() == [("S2B_MSIL1C_x",)]
+    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (1,)
+    assert corrected_rows(raw_db) == [("corrected",)]
     assert raw_db.execute("SELECT COUNT(*) FROM errors").fetchone() == (0,)
-    assert raw_db.execute("SELECT COUNT(*) FROM corrected WHERE status = 'error'").fetchone() == (0,)
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert GEE_ID in warnings[0].getMessage() and "_replacement" in warnings[0].getMessage()
 
 
-def test_a_different_image_with_stored_metadata_marks_nothing_in_the_fake_db(
-    steps, fake_db, config
-):
-    fake_db.kept_image = True
+def test_the_short_registered_id_is_loaded_as_registered(events, db, raw_db, config):
+    steps = Steps(events)
+    short_id = GEE_ID.rsplit("/", 1)[-1]
+    db.register_scene(DAY, TILE, short_id)  # the database keeps the short system:index
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.SUCCESS
+    assert steps.load_image_calls == [short_id]
+    assert raw_db.execute("SELECT gee_id FROM scenes").fetchall() == [(short_id,)]
+
+
+def test_a_registered_image_skips_the_search_in_the_fake_db(steps, fake_db, config, events):
+    fake_db.registered_id = GEE_ID
 
     status = build(steps, fake_db).run(DAY, TILE, config, ROI)
 
     assert status is RunStatus.SUCCESS
-    assert fake_db.saved_metadata == []
-    assert fake_db.marked_error == [] and fake_db.logged_errors == []
-    assert steps.transform_calls == [] and steps.load_calls == []
+    assert steps.extract_calls == []
+    assert steps.load_image_calls == [GEE_ID]
+    assert fake_db.registered == []  # the scene is already registered
+    assert fake_db.saved_metadata == [(DAY, TILE, PROPERTIES)]
+    assert fake_db.saved_metadata_gee_ids == [GEE_ID]
+    assert events[:3] == ["load_image", "describe", "save_scene_metadata"]
+    assert fake_db.marked_corrected == [(DAY, TILE, config, ROI, expected_asset_id(config))]
 
 
-def test_a_different_image_without_stored_metadata_is_still_refused(events, db, raw_db, config):
-    steps = Steps(events, image=FakeImage(gee_id=GEE_ID + "_replacement"))
-    db.register_scene(DAY, TILE, GEE_ID)  # registered with another image, never given metadata
+def test_a_failing_load_of_the_registered_image_is_an_extract_error(steps, fake_db, config):
+    fake_db.registered_id = GEE_ID
+    steps.load_image_error = RuntimeError("gee down")
 
-    status = build(steps, db).run(DAY, TILE, config, ROI)
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
 
     assert status is RunStatus.FAIL
-    assert steps.load_calls == []
-    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (0,)
-    assert "_replacement" in raw_db.execute("SELECT error_msg FROM errors").fetchone()[0]
+    assert [step for step, *_rest in fake_db.logged_errors] == ["extract"]
+    assert steps.transform_calls == []
+
+
+def test_a_fresh_scene_is_searched_and_never_loaded_by_id(steps, fake_db, config):
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.extract_calls == [(DAY, TILE, ROI)]
+    assert steps.load_image_calls == []
+
+
+def test_a_registered_image_already_corrected_never_loads_in_the_fake_db(steps, fake_db, config):
+    fake_db.corrected = True
+    fake_db.registered_id = GEE_ID
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.extract_calls == [] and steps.load_image_calls == []
 
 
 def test_metadata_is_saved_right_after_registering_the_scene(steps, fake_db, config, events):
@@ -588,7 +677,8 @@ def test_a_failed_run_is_retried_on_the_next_run(events, db, config):
     steps.task_states = ("COMPLETED",)
 
     assert pipeline.run(DAY, TILE, config, ROI) is RunStatus.SUCCESS
-    assert len(steps.extract_calls) == 2
+    assert len(steps.extract_calls) == 1  # the registered image is loaded, not searched again
+    assert steps.load_image_calls == [GEE_ID]
     assert db.is_corrected(DAY, TILE, config, ROI) is True
 
 
@@ -654,7 +744,8 @@ def test_a_different_roi_is_processed_again(events, db, config):
     second = pipeline.run(DAY, TILE, config, OTHER_ROI)
 
     assert (first, second) == (RunStatus.SUCCESS, RunStatus.SUCCESS)
-    assert len(steps.extract_calls) == 2
+    assert len(steps.extract_calls) == 1
+    assert steps.load_image_calls == [GEE_ID]
     assert len(steps.load_calls) == 2
 
 

@@ -3,7 +3,8 @@ from datetime import date
 import pytest
 
 from src.steps import extract as extract_module
-from src.steps.extract import extract
+from src.steps.describe import COLLECTION
+from src.steps.extract import extract, load_image
 
 from conftest import DAY, ROI, TILE
 from fakes import FakeCollection, FakeImage
@@ -133,3 +134,19 @@ def test_search_errors_propagate(monkeypatch):
 
     with pytest.raises(RuntimeError, match="gee down"):
         extract(DAY, TILE, ROI)
+
+
+class ImageEE:
+    Image = staticmethod(lambda asset_id: ("image", asset_id))
+
+
+def test_load_image_reads_a_short_id_from_the_l1c_collection(monkeypatch):
+    monkeypatch.setattr(extract_module, "ee", ImageEE)
+
+    assert load_image("20260921T105031_T30SXG") == ("image", f"{COLLECTION}/20260921T105031_T30SXG")
+
+
+def test_load_image_keeps_a_full_asset_id_as_it_is(monkeypatch):
+    monkeypatch.setattr(extract_module, "ee", ImageEE)
+
+    assert load_image(f"{COLLECTION}/abc") == ("image", f"{COLLECTION}/abc")

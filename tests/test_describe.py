@@ -1,5 +1,5 @@
 from src.steps import describe as describe_module
-from src.steps.describe import COLLECTION, describe, fetch_properties
+from src.steps.describe import COLLECTION, describe, fetch_properties, image_asset_id
 
 from conftest import GEE_ID
 
@@ -106,4 +106,12 @@ def test_fetch_properties_keeps_a_full_asset_id_as_it_is(monkeypatch):
     fetch_properties(GEE_ID)
 
     assert fake.images == [GEE_ID]
+
+
+def test_image_asset_id_prefixes_a_short_id_with_the_collection():
+    assert image_asset_id(SHORT_ID) == f"{COLLECTION}/{SHORT_ID}"
+
+
+def test_image_asset_id_keeps_a_full_asset_id_as_it_is():
+    assert image_asset_id(GEE_ID) == GEE_ID
 

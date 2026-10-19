@@ -12,7 +12,7 @@ from src.ddbb.connection import DBConnection
 from src.pipeline import AcoliteConfig, Pipeline, RunStatus
 from src.steps.assets import asset_exists
 from src.steps.describe import describe
-from src.steps.extract import extract
+from src.steps.extract import extract, load_image
 from src.steps.load import load
 from src.steps.transform import transform
 
@@ -74,6 +74,7 @@ def build_pipeline(db_path: Path) -> Pipeline:
     _initialize_earth_engine()
     return Pipeline(
         extract=extract,
+        load_image=load_image,
         describe=describe,
         transform=transform,
         load=load,

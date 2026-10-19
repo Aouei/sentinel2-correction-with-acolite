@@ -16,7 +16,11 @@ def describe(image: "ee.Image") -> tuple[str, dict[str, Any]]:
     return info["id"], info["properties"]
 
 
+def image_asset_id(gee_id: str) -> str:
+    """Full Earth Engine asset id of an image; the database keeps the short system:index."""
+    return gee_id if "/" in gee_id else f"{COLLECTION}/{gee_id}"
+
+
 def fetch_properties(gee_id: str) -> dict[str, Any]:
     """Properties of an image already known by its gee_id. Used to backfill older scenes."""
-    asset_id = gee_id if "/" in gee_id else f"{COLLECTION}/{gee_id}"  # the database keeps the short id
-    return describe(ee.Image(asset_id))[1]
+    return describe(ee.Image(image_asset_id(gee_id)))[1]

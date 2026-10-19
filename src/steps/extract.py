@@ -4,6 +4,13 @@ from typing import Any
 import ee
 from gee_acolite.utils import search
 
+from src.steps.describe import image_asset_id
+
+
+def load_image(gee_id: str) -> "ee.Image":
+    """The Sentinel-2 L1C image already registered for a scene, by its gee_id (short or full)."""
+    return ee.Image(image_asset_id(gee_id))
+
 
 def extract(date: date, tile: str, roi: dict[str, Any]) -> "ee.Image | None":
     """Sentinel-2 L1C image of `tile` acquired on `date` inside `roi`, or None.

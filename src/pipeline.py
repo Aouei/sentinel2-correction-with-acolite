@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,9 +12,7 @@ from typing import Any, Literal
 from src.ddbb.connection import DBConnection
 from src.roi import hash_roi
 
-logger = logging.getLogger(__name__)
-
-ASSET_FOLDER ="projects/ee-sergiohercar1/assets/ETL"
+ASSET_FOLDER = "projects/ee-sergiohercar1/assets/ETL"
 ASSET_HASH_LENGTH = 12  # the full hashes live in the database; the asset name stays short
 POLL_SECONDS = 10
 TASK_TIMEOUT_SECONDS = 30 * 60  # a stuck export (e.g. READY in a saturated queue) must not block a batch
@@ -49,6 +46,7 @@ class Pipeline:
     def __init__(
         self,
         extract: Callable[[date, str, dict[str, Any]], Any],
+        load_image: Callable[[str], Any],
         describe: Callable[[Any], tuple[str, dict[str, Any]]],
         transform: Callable[[Any, AcoliteConfig], Any],
         load: Callable[[Any, str, dict[str, Any]], Any],
@@ -56,6 +54,7 @@ class Pipeline:
         db: DBConnection,
     ) -> None:
         self._extract = extract
+        self._load_image = load_image
         self._describe = describe
         self._transform = transform
         self._load = load
@@ -68,31 +67,26 @@ class Pipeline:
         if self._db.is_corrected(date, tile, config, roi):
             return RunStatus.SUCCESS
 
+        # A registered gee_id settles the search: we stay with that image and never look for
+        # another one (e.g. a reprocessed product). A NULL gee_id means "searched, nothing found":
+        # that date is searched again, an image may show up later.
+        registered = self._db.registered_gee_id(date, tile)
         try:
-            image = self._extract(date, tile, roi)
+            if registered is not None:
+                image = self._load_image(registered)
+            else:
+                image = self._extract(date, tile, roi)
             # One Earth Engine round trip gives both the gee_id and the properties of the image.
             gee_id, properties = self._describe(image) if image is not None else (None, None)
         except Exception as error:
             self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
             return RunStatus.FAIL
 
-        # Record the attempt even without image: a row with gee_id NULL means "searched, Earth
-        # Engine has nothing", while no row at all means the date was never searched.
-        self._db.register_scene(date, tile, gee_id)
+        if registered is None:
+            # Record the attempt even without image: a row with gee_id NULL means "searched, Earth
+            # Engine has nothing", while no row at all means the date was never searched.
+            self._db.register_scene(date, tile, gee_id)
         if image is None:
-            return RunStatus.SUCCESS
-        # A reprocessed product of an already registered scene: we stay with what we have. Do not
-        # export it under the registration of the other image, nor overwrite its metadata.
-        kept = self._db.kept_image_instead_of(date, tile, gee_id)
-        if kept is not None:
-            logger.warning(
-                "%s %s is registered with image %s, but Earth Engine returned image %s: "
-                "keeping the registered one, nothing was processed or overwritten",
-                date.isoformat(),
-                tile,
-                kept,
-                gee_id,
-            )
             return RunStatus.SUCCESS
         try:
             self._db.save_scene_metadata(date, tile, properties, gee_id=gee_id)
