@@ -64,6 +64,7 @@ class FakeDB:
         self.marked_corrected = []
         self.marked_error = []
         self.logged_errors = []
+        self.logged_tracebacks = []
 
     def is_corrected(self, date, tile, config, roi):
         self.is_corrected_calls.append((date, tile, config, roi))
@@ -81,9 +82,10 @@ class FakeDB:
         self.events.append("mark_error")
         self.marked_error.append((date, tile, config, roi))
 
-    def log_error(self, step, message, date, tile, config=None):
+    def log_error(self, step, message, date, tile, config=None, traceback=None):
         self.events.append(f"log_error:{step}")
         self.logged_errors.append((step, message, date, tile, config))
+        self.logged_tracebacks.append(traceback)
 
 
 class Steps:
@@ -597,3 +599,68 @@ def test_interrupting_the_wait_cancels_the_task_and_propagates(events, fake_db, 
 
     assert steps.tasks[0].cancelled is True
     assert fake_db.marked_corrected == []
+
+
+# --- the traceback of every failure is recorded -------------------------------
+
+
+def assert_traceback(text, error_type, message):
+    assert text is not None
+    assert "Traceback (most recent call last)" in text
+    assert error_type in text
+    assert message in text
+
+
+def test_the_traceback_of_an_extract_error_is_logged(steps, fake_db, config):
+    steps.extract_error = RuntimeError("gee down")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    [text] = fake_db.logged_tracebacks
+    assert_traceback(text, "RuntimeError", "gee down")
+
+
+def test_the_traceback_of_a_transform_error_is_logged(steps, fake_db, config):
+    steps.transform_error = ValueError("acolite crashed")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    [text] = fake_db.logged_tracebacks
+    assert_traceback(text, "ValueError", "acolite crashed")
+
+
+def test_the_traceback_of_a_load_error_is_logged(steps, fake_db, config):
+    steps.load_error = OSError("cannot start export")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    [text] = fake_db.logged_tracebacks
+    assert_traceback(text, "OSError", "cannot start export")
+
+
+def test_the_traceback_of_an_asset_check_error_is_logged(steps, fake_db, config):
+    steps.asset_exists_error = RuntimeError("gee down")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    [text] = fake_db.logged_tracebacks
+    assert_traceback(text, "RuntimeError", "gee down")
+
+
+def test_the_traceback_of_a_failed_export_task_is_logged(events, fake_db, config):
+    steps = Steps(events, task_states=("FAILED",))
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    [text] = fake_db.logged_tracebacks
+    assert_traceback(text, "ExportError", "export exploded")
+
+
+def test_the_traceback_is_persisted_with_the_error(events, db, raw_db, config):
+    steps = Steps(events)
+    steps.transform_error = ValueError("acolite crashed")
+
+    build(steps, db).run(DAY, TILE, config, ROI)
+
+    [(text,)] = raw_db.execute("SELECT traceback FROM errors").fetchall()
+    assert_traceback(text, "ValueError", "acolite crashed")

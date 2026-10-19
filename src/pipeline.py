@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from pathlib import Path
+from traceback import format_exception
 from typing import Any, Literal
 
 from src.ddbb.connection import DBConnection
@@ -66,7 +67,7 @@ class Pipeline:
             image = self._extract(date, tile, roi)
             gee_id = image.id().getInfo() if image is not None else None
         except Exception as error:
-            self._db.log_error("extract", _describe(error), date, tile)
+            self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
             return RunStatus.FAIL
 
         if image is None:
@@ -108,7 +109,7 @@ class Pipeline:
         config: AcoliteConfig,
         roi: dict[str, Any],
     ) -> RunStatus:
-        self._db.log_error(step, _describe(error), date, tile, config)
+        self._db.log_error(step, _describe(error), date, tile, config, traceback=_trace(error))
         self._db.mark_error(date, tile, config, roi)
         return RunStatus.FAIL
 
@@ -121,6 +122,10 @@ def _asset_id(date: date, tile: str, config: AcoliteConfig, roi: dict[str, Any])
 
 def _describe(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
+
+
+def _trace(error: Exception) -> str:
+    return "".join(format_exception(error))
 
 
 def _wait_until_completed(task: Any) -> None:
