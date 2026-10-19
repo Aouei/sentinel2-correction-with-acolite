@@ -79,7 +79,10 @@ class Pipeline:
             # One Earth Engine round trip gives both the gee_id and the properties of the image.
             gee_id, properties = self._describe(image) if image is not None else (None, None)
         except Exception as error:
-            self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
+            message = _describe(error)
+            if registered is not None:
+                message = f"cannot load the registered image {registered}: {message}"
+            self._db.log_error("extract", message, date, tile, traceback=_trace(error))
             return RunStatus.FAIL
 
         if registered is None:

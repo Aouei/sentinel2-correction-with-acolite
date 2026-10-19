@@ -33,7 +33,7 @@ Each corrected scene is exported at 10 m resolution (EPSG:4326), clipped to the 
 ```mermaid
 flowchart LR
     CLI["CLI<br/>main.py"] --> P["Pipeline"]
-    P --> E["Extract<br/>search scene in GEE"]
+    P --> E["Extract<br/>load registered image by id<br/>or search the scene in GEE"]
     E --> T["Transform<br/>ACOLITE (DSF, L2W)"]
     T --> L["Load<br/>export asset to GEE"]
     E -.-> DB[("SQLite<br/>scenes · scene_metadata · corrected · errors")]
@@ -44,7 +44,7 @@ flowchart LR
 
 | Stage | Responsibility |
 | --- | --- |
-| **Extract** | Searches the tile for the requested date inside the ROI. If several products exist, the most recently generated one is used. A date with no image is recorded as such. |
+| **Extract** | Searches the tile for the requested date inside the ROI. If several products exist, the most recently generated one is used. A registered scene loads its image by id and never searches again. A date with no image is recorded as such and searched again on re-runs. |
 | **Transform** | Runs ACOLITE (dark spectrum fusion, L2W water products) from a local ACOLITE installation. |
 | **Load** | Selects the output bands and starts an `Export.image.toAsset` task. The pipeline polls it until completion (30 min timeout) and cancels it on timeout or interruption. |
 
@@ -88,6 +88,16 @@ FROM scene_metadata AS m JOIN scenes AS s ON s.id = m.scene_id;
 ```
 
 New runs record the metadata at extract time, sharing the Earth Engine call that reads the image id.
+
+#### Manual reset of a scene
+
+A registered scene keeps its image. If that image disappears from the collection (rare), the scene
+fails on every run with an `extract` error saying it cannot load the registered image. To recover,
+clear the registered id so the next run searches again and registers the current image:
+
+```sql
+UPDATE scenes SET gee_id = NULL WHERE date = 'YYYY-MM-DD' AND tile = 'TXXXXX';
+```
 A scene keeps the first image registered for it. Once `(date, tile)` has a `gee_id`, the search is
 settled and is not repeated: later runs (e.g. under another config or ROI) load that same image by its
 id, so a reprocessed product of the same date never replaces it. A scene whose `gee_id` is `NULL`

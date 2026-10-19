@@ -406,6 +406,8 @@ def test_a_failing_load_of_the_registered_image_is_an_extract_error(steps, fake_
 
     assert status is RunStatus.FAIL
     assert [step for step, *_rest in fake_db.logged_errors] == ["extract"]
+    message = fake_db.logged_errors[0][1]
+    assert message == f"cannot load the registered image {GEE_ID}: RuntimeError: gee down"
     assert steps.transform_calls == []
 
 
