@@ -98,6 +98,7 @@ class Steps:
         self.extract_calls = []
         self.describe_calls = []
         self.describe_error = None
+        self.properties = PROPERTIES
         self.transform_calls = []
         self.load_calls = []
         self.transformed = FakeImage("transformed")
@@ -122,7 +123,7 @@ class Steps:
         self.describe_calls.append(image)
         if self.describe_error:
             raise self.describe_error
-        return image.gee_id, PROPERTIES
+        return image.gee_id, self.properties
 
     def transform(self, image, config):
         self.events.append("transform")
@@ -312,6 +313,38 @@ def test_a_failing_metadata_save_is_an_extract_error_and_stops_the_run(steps, fa
     assert status is RunStatus.FAIL
     assert [step for step, *_rest in fake_db.logged_errors] == ["extract"]
     assert steps.transform_calls == []
+
+
+def test_a_failing_metadata_save_marks_the_scene_as_error(steps, fake_db, config):
+    fake_db.save_metadata_error = ValueError("the image has no PRODUCT_ID property")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert fake_db.marked_error == [(DAY, TILE, config, ROI)]
+    assert steps.load_calls == []
+
+
+def test_a_failing_metadata_save_message_names_the_offending_property(steps, fake_db, config):
+    fake_db.save_metadata_error = ValueError("the image has no PRODUCT_ID property")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    ((step, message, _date, _tile, logged_config),) = fake_db.logged_errors
+    assert step == "extract"
+    assert "scene metadata" in message and "PRODUCT_ID" in message
+    assert logged_config is config
+
+
+def test_a_metadata_failure_leaves_a_visible_error_state(events, db, raw_db, config):
+    steps = Steps(events)
+    steps.properties = {"SPACECRAFT_NAME": "Sentinel-2B", "system:time_start": 1}  # no PRODUCT_ID
+
+    status = build(steps, db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert raw_db.execute("SELECT status FROM corrected").fetchall() == [("error",)]
+    assert "PRODUCT_ID" in raw_db.execute("SELECT error_msg FROM errors").fetchone()[0]
+    assert steps.load_calls == []
 
 
 # --- happy path -----------------------------------------------------------

@@ -81,7 +81,16 @@ class Pipeline:
         try:
             self._db.save_scene_metadata(date, tile, properties)
         except Exception as error:  # e.g. an image without PRODUCT_ID: do not export what we cannot describe
-            self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
+            # The scene is already registered: leave a visible error state, not a silent half-done one.
+            self._db.log_error(
+                "extract",
+                f"cannot save the scene metadata: {_describe(error)}",
+                date,
+                tile,
+                config,
+                traceback=_trace(error),
+            )
+            self._db.mark_error(date, tile, config, roi)
             return RunStatus.FAIL
 
         # The asset id is deterministic and Earth Engine never overwrites: if a previous run lost
