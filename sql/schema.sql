@@ -62,3 +62,25 @@ CREATE TABLE IF NOT EXISTS errors (
     -- column existed (DBConnection adds it to older databases).
     traceback    TEXT
 );
+
+-- One row of metadata of the SOURCE (Sentinel-2 L1C) image of a scene: 1:1 with `scenes`, and only
+-- for scenes that have an image. Days without image (gee_id IS NULL) get no row.
+-- The typed columns are the ones worth filtering on; `properties` keeps every raw image property
+-- (~80) as JSON, queryable with json_extract(properties, '$.NAME') or properties ->> '$.NAME'.
+-- Databases created before this table get it from CREATE TABLE IF NOT EXISTS (nothing else changes);
+-- rows for scenes processed earlier are filled by scripts/backfill_scene_metadata.py.
+CREATE TABLE IF NOT EXISTS scene_metadata (
+    scene_id                   INTEGER PRIMARY KEY REFERENCES scenes (id),
+    product_id                 TEXT    NOT NULL,
+    spacecraft                 TEXT    NOT NULL CHECK (spacecraft IN ('S2A', 'S2B', 'S2C')),
+    processing_baseline        TEXT,
+    orbit                      INTEGER,
+    -- Exact acquisition instant (system:time_start), UTC.
+    acquired_at                TEXT    NOT NULL,
+    cloudy_pixel_percentage    REAL,
+    cloud_coverage_assessment  REAL,
+    mean_solar_zenith          REAL,
+    mean_solar_azimuth         REAL,
+    properties                 TEXT    NOT NULL CHECK (json_valid(properties)),
+    created_at                 TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

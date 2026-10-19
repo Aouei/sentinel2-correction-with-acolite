@@ -2,6 +2,8 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from src.ddbb.connection import DBConnection
 from src.pipeline import AcoliteConfig
 from src.roi import hash_roi
@@ -456,3 +458,171 @@ def test_opening_a_migrated_database_again_does_not_rebuild_it(tmp_path):
     raw = sqlite3.connect(path)
     assert raw.execute("SELECT date, gee_id FROM scenes").fetchall() == [("2026-09-21", None)]
     raw.close()
+
+
+# --- scene_metadata: one row of source-image metadata per scene with image -----------
+
+SOURCE_PROPERTIES = {
+    "PRODUCT_ID": "S2B_MSIL1C_20260921T105031_N0511_R051_T30SXG_20260921T130000",
+    "SPACECRAFT_NAME": "Sentinel-2B",
+    "PROCESSING_BASELINE": "05.11",
+    "SENSING_ORBIT_NUMBER": 51,
+    "system:time_start": 1789987831024,
+    "CLOUDY_PIXEL_PERCENTAGE": 3.5,
+    "CLOUD_COVERAGE_ASSESSMENT": 3.25,
+    "MEAN_SOLAR_ZENITH_ANGLE": 40.5,
+    "MEAN_SOLAR_AZIMUTH_ANGLE": 150.25,
+    "NODATA_PIXEL_PERCENTAGE": 0,
+}
+
+METADATA_COLUMNS = (
+    "product_id, spacecraft, processing_baseline, orbit, acquired_at, "
+    "cloudy_pixel_percentage, cloud_coverage_assessment, mean_solar_zenith, mean_solar_azimuth"
+)
+
+
+def test_creates_the_scene_metadata_table(raw_db):
+    assert "scene_metadata" in tables(raw_db)
+
+
+def test_save_scene_metadata_stores_the_typed_columns(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+
+    assert raw_db.execute(f"SELECT {METADATA_COLUMNS} FROM scene_metadata").fetchall() == [
+        (
+            "S2B_MSIL1C_20260921T105031_N0511_R051_T30SXG_20260921T130000",
+            "S2B",
+            "05.11",
+            51,
+            "2026-09-21T10:50:31.024Z",
+            3.5,
+            3.25,
+            40.5,
+            150.25,
+        )
+    ]
+
+
+def test_save_scene_metadata_links_the_scene_one_to_one(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+
+    scene_id = raw_db.execute("SELECT id FROM scenes").fetchone()[0]
+    assert raw_db.execute("SELECT scene_id FROM scene_metadata").fetchall() == [(scene_id,)]
+
+
+def test_the_raw_properties_are_queryable_json(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+
+    row = raw_db.execute(
+        "SELECT properties ->> '$.NODATA_PIXEL_PERCENTAGE', json_extract(properties, '$.PROCESSING_BASELINE') "
+        "FROM scene_metadata"
+    ).fetchone()
+    assert row == (0, "05.11")
+
+
+def test_save_scene_metadata_is_idempotent(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+
+    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (1,)
+
+
+def test_save_scene_metadata_refreshes_the_existing_row(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+    db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+
+    db.save_scene_metadata(DAY, TILE, {**SOURCE_PROPERTIES, "PROCESSING_BASELINE": "05.12"})
+
+    assert raw_db.execute("SELECT processing_baseline FROM scene_metadata").fetchall() == [("05.12",)]
+
+
+def test_save_scene_metadata_needs_a_registered_scene(db):
+    with pytest.raises(LookupError):
+        db.save_scene_metadata(DAY, TILE, SOURCE_PROPERTIES)
+
+
+def test_a_failed_save_leaves_no_row(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+    incomplete = {key: value for key, value in SOURCE_PROPERTIES.items() if key != "PRODUCT_ID"}
+
+    with pytest.raises(ValueError):
+        db.save_scene_metadata(DAY, TILE, incomplete)
+
+    assert raw_db.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (0,)
+
+
+def test_properties_must_be_valid_json(raw_db, db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        raw_db.execute(
+            "INSERT INTO scene_metadata (scene_id, product_id, spacecraft, acquired_at, properties) "
+            "VALUES (1, 'S2B_x', 'S2B', '2026-09-21T10:50:31.024Z', 'not json')"
+        )
+
+
+def test_scene_metadata_requires_an_existing_scene(db, db_path):
+    raw = sqlite3.connect(db_path)
+    raw.execute("PRAGMA foreign_keys = ON")
+    with pytest.raises(sqlite3.IntegrityError):
+        raw.execute(
+            "INSERT INTO scene_metadata (scene_id, product_id, spacecraft, acquired_at, properties) "
+            "VALUES (99, 'S2B_x', 'S2B', '2026-09-21T10:50:31.024Z', '{}')"
+        )
+    raw.close()
+
+
+def test_scenes_without_metadata_lists_only_scenes_with_image_and_no_row(db):
+    db.register_scene(DAY, TILE, GEE_ID)
+    db.register_scene(date(2026, 9, 22), TILE, GEE_ID + "_done")
+    db.register_scene(date(2026, 9, 23), TILE, None)
+    db.save_scene_metadata(date(2026, 9, 22), TILE, SOURCE_PROPERTIES)
+
+    assert db.scenes_without_metadata() == [(DAY, TILE, GEE_ID)]
+
+
+def test_scenes_without_metadata_is_ordered_by_date(db):
+    db.register_scene(date(2026, 9, 23), TILE, GEE_ID + "_c")
+    db.register_scene(DAY, TILE, GEE_ID + "_a")
+    db.register_scene(date(2026, 9, 22), TILE, GEE_ID + "_b")
+
+    assert [day for day, _tile, _gee_id in db.scenes_without_metadata()] == [
+        DAY,
+        date(2026, 9, 22),
+        date(2026, 9, 23),
+    ]
+
+
+def test_a_database_without_scene_metadata_gets_the_table_and_keeps_its_data(tmp_path, config):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(SCHEMA_PATH.read_text(encoding="utf-8").split("-- One row of metadata")[0])
+    old.executescript(
+        """
+        INSERT INTO scenes (id, date, tile, gee_id) VALUES (1, '2018-01-02', 'T29SPA', 'S2/A');
+        INSERT INTO scenes (id, date, tile, gee_id) VALUES (2, '2018-01-03', 'T29SPA', NULL);
+        INSERT INTO corrected (scene_id, ac_version, params_hash, roi_hash, status, asset_id)
+            VALUES (1, '20231023.0', 'p', 'r', 'corrected', 'asset/a');
+        """
+    )
+    old.commit()
+    assert "scene_metadata" not in {r[0] for r in old.execute("SELECT name FROM sqlite_master")}
+    old.close()
+
+    migrated = DBConnection(path)
+    DBConnection(path)  # opening it again is harmless
+
+    raw = sqlite3.connect(path)
+    assert raw.execute("SELECT COUNT(*) FROM scene_metadata").fetchone() == (0,)
+    assert raw.execute("SELECT COUNT(*) FROM scenes").fetchone() == (2,)
+    assert raw.execute("SELECT COUNT(*) FROM corrected").fetchone() == (1,)
+    raw.close()
+    assert migrated.scenes_without_metadata() == [(date(2018, 1, 2), "T29SPA", "S2/A")]

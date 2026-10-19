@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from src.roi import hash_roi
+from src.scene_metadata import scene_metadata_columns
 
 if TYPE_CHECKING:
     from src.pipeline import AcoliteConfig
@@ -40,6 +41,34 @@ class DBConnection:
                 "WHERE scenes.gee_id IS NULL AND excluded.gee_id IS NOT NULL",
                 (date.isoformat(), tile, gee_id),
             )
+
+    def save_scene_metadata(self, date: date, tile: str, properties: dict[str, Any]) -> None:
+        """Store the Sentinel-2 L1C image properties of a registered scene (typed columns + raw JSON).
+
+        Idempotent: saving again refreshes the row. Raises ValueError when the properties lack a
+        mandatory field (nothing is written) and LookupError when the scene is not registered.
+        """
+        columns = scene_metadata_columns(properties)
+        names = ", ".join(columns)
+        marks = ", ".join("?" for _ in columns)
+        refresh = ", ".join(f"{name} = excluded.{name}" for name in columns)
+        with self._connect() as connection:
+            scene_id = self._require_scene_id(connection, date, tile)
+            connection.execute(
+                f"INSERT INTO scene_metadata (scene_id, {names}) VALUES (?, {marks}) "
+                f"ON CONFLICT (scene_id) DO UPDATE SET {refresh}",
+                (scene_id, *columns.values()),
+            )
+
+    def scenes_without_metadata(self) -> list[tuple[date, str, str]]:
+        """(date, tile, gee_id) of every scene with an image and no scene_metadata row, oldest first."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT s.date, s.tile, s.gee_id FROM scenes AS s "
+                "LEFT JOIN scene_metadata AS m ON m.scene_id = s.id "
+                "WHERE s.gee_id IS NOT NULL AND m.scene_id IS NULL ORDER BY s.date, s.tile"
+            ).fetchall()
+        return [(date.fromisoformat(day), tile, gee_id) for day, tile, gee_id in rows]
 
     def is_corrected(
         self, date: date, tile: str, config: "AcoliteConfig", roi: dict[str, Any]
