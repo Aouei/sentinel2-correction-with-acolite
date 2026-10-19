@@ -4,8 +4,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-SPACECRAFT_NAME_PATTERN = re.compile(r"Sentinel-2([ABC])")
-PRODUCT_ID_PATTERN = re.compile(r"S2([ABC])_")
+SPACECRAFT_NAME_PATTERN = re.compile(r"Sentinel-2([A-Z])")
+PRODUCT_ID_PATTERN = re.compile(r"S2([A-Z])_")
 
 
 def scene_metadata_columns(properties: dict[str, Any]) -> dict[str, Any]:
@@ -36,7 +36,7 @@ def _required(properties: dict[str, Any], name: str) -> Any:
 
 
 def _spacecraft(properties: dict[str, Any]) -> str:
-    """S2A / S2B / S2C from SPACECRAFT_NAME, falling back to the PRODUCT_ID prefix."""
+    """S2A, S2B, S2C... from SPACECRAFT_NAME, falling back to the PRODUCT_ID prefix."""
     name_match = SPACECRAFT_NAME_PATTERN.search(str(properties.get("SPACECRAFT_NAME", "")))
     if name_match:
         return f"S2{name_match.group(1)}"

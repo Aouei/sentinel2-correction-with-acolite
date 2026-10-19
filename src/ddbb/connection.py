@@ -163,6 +163,7 @@ class DBConnection:
         if "traceback" not in columns:
             connection.execute("ALTER TABLE errors ADD COLUMN traceback TEXT")
         cls._make_gee_id_nullable(connection)
+        cls._open_the_spacecraft_check(connection)
 
     @staticmethod
     def _make_gee_id_nullable(connection: sqlite3.Connection) -> None:
@@ -187,6 +188,32 @@ class DBConnection:
                 + f"; INSERT INTO scenes_new ({names}) SELECT {names} FROM scenes;"
                 + "DROP TABLE scenes;"
                 + "ALTER TABLE scenes_new RENAME TO scenes;"
+                + "COMMIT;"
+            )
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+
+    @staticmethod
+    def _open_the_spacecraft_check(connection: sqlite3.Connection) -> None:
+        """SQLite cannot alter a CHECK: rebuild `scene_metadata` if it still has the closed satellite list."""
+        row = connection.execute("SELECT sql FROM sqlite_master WHERE name = 'scene_metadata'").fetchone()
+        if row is None or "spacecraft IN" not in row[0]:  # missing (impossible after schema.sql) or already a pattern
+            return
+
+        fresh = sqlite3.connect(":memory:")
+        fresh.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        table_sql = fresh.execute("SELECT sql FROM sqlite_master WHERE name = 'scene_metadata'").fetchone()[0]
+        fresh.close()
+
+        names = ", ".join(info[1] for info in connection.execute("PRAGMA table_info(scene_metadata)"))
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.executescript(
+                "BEGIN;"
+                + table_sql.replace("CREATE TABLE scene_metadata", "CREATE TABLE scene_metadata_new", 1)
+                + f"; INSERT INTO scene_metadata_new ({names}) SELECT {names} FROM scene_metadata;"
+                + "DROP TABLE scene_metadata;"
+                + "ALTER TABLE scene_metadata_new RENAME TO scene_metadata;"
                 + "COMMIT;"
             )
         finally:

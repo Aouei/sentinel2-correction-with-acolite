@@ -114,3 +114,8 @@ def test_the_acquisition_time_keeps_the_exact_millisecond():
     columns = scene_metadata_columns(properties(**{"system:time_start": 1514891679001}))
 
     assert columns["acquired_at"] == "2018-01-02T11:14:39.001Z"
+
+
+def test_a_future_sentinel_2_unit_is_recognised():
+    assert scene_metadata_columns(properties(SPACECRAFT_NAME="Sentinel-2D"))["spacecraft"] == "S2D"
+    assert scene_metadata_columns(without("SPACECRAFT_NAME") | {"PRODUCT_ID": "S2D_MSIL1C_x"})["spacecraft"] == "S2D"

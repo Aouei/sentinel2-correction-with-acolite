@@ -77,7 +77,8 @@ A correction is uniquely identified by:
 | `errors` | Append-only log of failures with step (`extract`, `transform`, `load`), message and traceback. |
 
 The schema is defined in [`sql/schema.sql`](sql/schema.sql) and created automatically on first use.
-Opening an older database adds the missing `scene_metadata` table without touching its data.
+Opening an older database adds the missing `scene_metadata` table and rebuilds it if it still has the
+closed `spacecraft` list (`S2A`, `S2B`, `S2C`), keeping its data. `spacecraft` accepts any `S2` + letter.
 
 The raw properties are queryable with SQLite's JSON functions:
 

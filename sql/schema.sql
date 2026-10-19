@@ -69,10 +69,11 @@ CREATE TABLE IF NOT EXISTS errors (
 -- (~80) as JSON, queryable with json_extract(properties, '$.NAME') or properties ->> '$.NAME'.
 -- Databases created before this table get it from CREATE TABLE IF NOT EXISTS (nothing else changes);
 -- rows for scenes processed earlier are filled by scripts/backfill_scene_metadata.py.
+-- `spacecraft` is a pattern, not a closed list: a new satellite must not block the ETL.
 CREATE TABLE IF NOT EXISTS scene_metadata (
     scene_id                   INTEGER PRIMARY KEY REFERENCES scenes (id),
     product_id                 TEXT    NOT NULL,
-    spacecraft                 TEXT    NOT NULL CHECK (spacecraft IN ('S2A', 'S2B', 'S2C')),
+    spacecraft                 TEXT    NOT NULL CHECK (spacecraft GLOB 'S2[A-Z]'),
     processing_baseline        TEXT,
     orbit                      INTEGER,
     -- Exact acquisition instant (system:time_start), UTC.

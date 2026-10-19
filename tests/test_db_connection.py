@@ -658,3 +658,74 @@ def test_a_database_without_scene_metadata_gets_the_table_and_keeps_its_data(tmp
     assert raw.execute("SELECT COUNT(*) FROM corrected").fetchone() == (1,)
     raw.close()
     assert migrated.scenes_without_metadata() == [(date(2018, 1, 2), "T29SPA", "S2/A")]
+
+
+# --- spacecraft is a pattern, not a closed list ------------------------------------------
+
+OLD_SPACECRAFT_CHECK = "CHECK (spacecraft IN ('S2A', 'S2B', 'S2C'))"
+NEW_SPACECRAFT_CHECK = "CHECK (spacecraft GLOB 'S2[A-Z]')"
+
+
+def insert_metadata(connection, scene_id, spacecraft):
+    connection.execute(
+        "INSERT INTO scene_metadata (scene_id, product_id, spacecraft, acquired_at, properties) "
+        "VALUES (?, 'p', ?, '2026-09-21T10:50:31.024Z', '{\"a\": 1}')",
+        (scene_id, spacecraft),
+    )
+
+
+def test_a_new_satellite_letter_is_accepted(raw_db, db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    insert_metadata(raw_db, 1, "S2D")
+
+
+def test_a_value_that_is_not_a_sentinel_2_unit_is_rejected(raw_db, db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        insert_metadata(raw_db, 1, "LS8")
+
+
+def test_a_database_with_the_closed_spacecraft_list_is_rebuilt_keeping_its_rows(tmp_path):
+    schema = SCHEMA_PATH.read_text(encoding="utf-8")
+    assert NEW_SPACECRAFT_CHECK in schema
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(schema.replace(NEW_SPACECRAFT_CHECK, OLD_SPACECRAFT_CHECK))
+    old.executescript(
+        """
+        INSERT INTO scenes (id, date, tile, gee_id) VALUES (1, '2018-01-02', 'T29SPA', 'a');
+        INSERT INTO scenes (id, date, tile, gee_id) VALUES (2, '2018-01-03', 'T29SPA', 'b');
+        """
+    )
+    insert_metadata(old, 1, "S2A")
+    insert_metadata(old, 2, "S2B")
+    old.commit()
+    with pytest.raises(sqlite3.IntegrityError):  # the old check really is the closed list
+        insert_metadata(old, 3, "S2D")
+    old.close()
+
+    DBConnection(path)
+    DBConnection(path)  # opening it again is harmless
+
+    raw = sqlite3.connect(path)
+    raw.execute("PRAGMA foreign_keys = ON")
+    sql = raw.execute("SELECT sql FROM sqlite_master WHERE name = 'scene_metadata'").fetchone()[0]
+    rows = raw.execute("SELECT scene_id, spacecraft, json_valid(properties) FROM scene_metadata ORDER BY 1").fetchall()
+    raw.execute("INSERT INTO scenes (id, date, tile, gee_id) VALUES (3, '2018-01-04', 'T29SPA', 'c')")
+    insert_metadata(raw, 3, "S2D")
+    with pytest.raises(sqlite3.IntegrityError):  # the other constraints survived the rebuild
+        raw.execute(
+            "INSERT INTO scene_metadata (scene_id, product_id, spacecraft, acquired_at, properties) "
+            "VALUES (99, 'p', 'S2A', 't', '{}')"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        raw.execute(
+            "INSERT INTO scene_metadata (scene_id, product_id, spacecraft, acquired_at, properties) "
+            "VALUES (2, 'p', 'S2A', 't', 'not json')"
+        )
+    raw.close()
+
+    assert NEW_SPACECRAFT_CHECK in sql and OLD_SPACECRAFT_CHECK not in sql
+    assert rows == [(1, "S2A", 1), (2, "S2B", 1)]
