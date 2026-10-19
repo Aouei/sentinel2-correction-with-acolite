@@ -46,12 +46,14 @@ class Pipeline:
     def __init__(
         self,
         extract: Callable[[date, str, dict[str, Any]], Any],
+        describe: Callable[[Any], tuple[str, dict[str, Any]]],
         transform: Callable[[Any, AcoliteConfig], Any],
         load: Callable[[Any, str, dict[str, Any]], Any],
         asset_exists: Callable[[str], bool],
         db: DBConnection,
     ) -> None:
         self._extract = extract
+        self._describe = describe
         self._transform = transform
         self._load = load
         self._asset_exists = asset_exists
@@ -65,7 +67,8 @@ class Pipeline:
 
         try:
             image = self._extract(date, tile, roi)
-            gee_id = image.id().getInfo() if image is not None else None
+            # One Earth Engine round trip gives both the gee_id and the properties of the image.
+            gee_id, properties = self._describe(image) if image is not None else (None, None)
         except Exception as error:
             self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
             return RunStatus.FAIL
@@ -75,6 +78,11 @@ class Pipeline:
         self._db.register_scene(date, tile, gee_id)
         if image is None:
             return RunStatus.SUCCESS
+        try:
+            self._db.save_scene_metadata(date, tile, properties)
+        except Exception as error:  # e.g. an image without PRODUCT_ID: do not export what we cannot describe
+            self._db.log_error("extract", _describe(error), date, tile, traceback=_trace(error))
+            return RunStatus.FAIL
 
         # The asset id is deterministic and Earth Engine never overwrites: if a previous run lost
         # its export (crash, Ctrl-C, locked database) the asset exists anyway, so adopt it.

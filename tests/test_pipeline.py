@@ -11,23 +11,15 @@ from conftest import DAY, GEE_ID, OTHER_ROI, ROI, TILE
 # --- fakes ----------------------------------------------------------------
 
 
-class FakeId:
-    def __init__(self, value):
-        self.value = value
-
-    def getInfo(self):
-        return self.value
+PROPERTIES = {"PRODUCT_ID": "S2B_MSIL1C_x", "SPACECRAFT_NAME": "Sentinel-2B", "system:time_start": 1}
 
 
 class FakeImage:
-    """Stands in for ee.Image: only `.id().getInfo()` is used by the pipeline."""
+    """Stands in for ee.Image. The pipeline never calls it: it only hands it to `describe`."""
 
     def __init__(self, name="image", gee_id=GEE_ID):
         self.name = name
         self.gee_id = gee_id
-
-    def id(self):
-        return FakeId(self.gee_id)
 
 
 class FakeTask:
@@ -61,6 +53,8 @@ class FakeDB:
         self.corrected = corrected
         self.is_corrected_calls = []
         self.registered = []
+        self.saved_metadata = []
+        self.save_metadata_error = None
         self.marked_corrected = []
         self.marked_error = []
         self.logged_errors = []
@@ -73,6 +67,12 @@ class FakeDB:
     def register_scene(self, date, tile, gee_id):
         self.events.append("register_scene")
         self.registered.append((date, tile, gee_id))
+
+    def save_scene_metadata(self, date, tile, properties):
+        self.events.append("save_scene_metadata")
+        if self.save_metadata_error:
+            raise self.save_metadata_error
+        self.saved_metadata.append((date, tile, properties))
 
     def mark_corrected(self, date, tile, config, roi, asset_id):
         self.events.append("mark_corrected")
@@ -96,6 +96,8 @@ class Steps:
         self.image = FakeImage() if image is None else image
         self.task_states = task_states
         self.extract_calls = []
+        self.describe_calls = []
+        self.describe_error = None
         self.transform_calls = []
         self.load_calls = []
         self.transformed = FakeImage("transformed")
@@ -114,6 +116,13 @@ class Steps:
         if self.extract_error:
             raise self.extract_error
         return None if self.no_image else self.image
+
+    def describe(self, image):
+        self.events.append("describe")
+        self.describe_calls.append(image)
+        if self.describe_error:
+            raise self.describe_error
+        return image.gee_id, PROPERTIES
 
     def transform(self, image, config):
         self.events.append("transform")
@@ -163,6 +172,7 @@ def fake_db(events):
 def build(steps, db):
     return Pipeline(
         extract=steps.extract,
+        describe=steps.describe,
         transform=steps.transform,
         load=steps.load,
         asset_exists=steps.asset_exists,
@@ -227,6 +237,83 @@ def test_no_image_runs_no_further_step_and_only_records_the_attempt(steps, fake_
     assert fake_db.logged_errors == []
 
 
+def test_no_image_is_never_described_and_has_no_metadata(steps, fake_db, config):
+    steps.no_image = True
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.describe_calls == []
+    assert fake_db.saved_metadata == []
+
+
+def test_already_corrected_never_describes_an_image(steps, fake_db, config):
+    fake_db.corrected = True
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.describe_calls == []
+    assert fake_db.saved_metadata == []
+
+
+# --- scene metadata -------------------------------------------------------
+
+
+def test_the_extracted_image_is_described_exactly_once(steps, fake_db, config):
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert steps.describe_calls == [steps.image]
+
+
+def test_the_source_image_properties_are_saved_for_the_scene(steps, fake_db, config):
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert fake_db.saved_metadata == [(DAY, TILE, PROPERTIES)]
+
+
+def test_metadata_is_saved_right_after_registering_the_scene(steps, fake_db, config, events):
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert events[:4] == ["extract", "describe", "register_scene", "save_scene_metadata"]
+
+
+def test_metadata_is_kept_even_when_the_export_fails(steps, fake_db, config):
+    steps.load_error = RuntimeError("export exploded")
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert fake_db.saved_metadata == [(DAY, TILE, PROPERTIES)]
+
+
+def test_metadata_is_kept_when_the_asset_already_exists(steps, fake_db, config):
+    steps.existing_assets.add(expected_asset_id(config))
+
+    build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert fake_db.saved_metadata == [(DAY, TILE, PROPERTIES)]
+
+
+def test_a_failing_describe_is_an_extract_error_and_registers_nothing(steps, fake_db, config):
+    steps.describe_error = RuntimeError("getInfo timed out")
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert [step for step, *_rest in fake_db.logged_errors] == ["extract"]
+    assert fake_db.registered == []
+    assert fake_db.saved_metadata == []
+    assert steps.transform_calls == []
+
+
+def test_a_failing_metadata_save_is_an_extract_error_and_stops_the_run(steps, fake_db, config):
+    fake_db.save_metadata_error = ValueError("the image has no PRODUCT_ID property")
+
+    status = build(steps, fake_db).run(DAY, TILE, config, ROI)
+
+    assert status is RunStatus.FAIL
+    assert [step for step, *_rest in fake_db.logged_errors] == ["extract"]
+    assert steps.transform_calls == []
+
+
 # --- happy path -----------------------------------------------------------
 
 
@@ -279,7 +366,9 @@ def test_steps_run_in_order_and_corrected_is_marked_last(steps, fake_db, events,
 
     assert events == [
         "extract",
+        "describe",
         "register_scene",
+        "save_scene_metadata",
         "asset_exists",
         "transform",
         "load",
