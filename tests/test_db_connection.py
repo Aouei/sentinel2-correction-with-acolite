@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import date
+from pathlib import Path
 
 from src.ddbb.connection import DBConnection
 from src.pipeline import AcoliteConfig
@@ -319,3 +320,139 @@ def test_a_database_created_before_the_traceback_column_is_migrated(tmp_path):
 def test_opening_the_database_twice_does_not_fail_on_the_migration(db_path):
     DBConnection(db_path)
     DBConnection(db_path)
+
+
+# --- scenes without image: gee_id is NULL ---------------------------------------
+
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "sql" / "schema.sql"
+
+
+def gee_id_of(raw_db, day=DAY):
+    return raw_db.execute("SELECT gee_id FROM scenes WHERE date = ?", (day.isoformat(),)).fetchone()
+
+
+def test_register_scene_accepts_a_null_gee_id(db, raw_db):
+    db.register_scene(DAY, TILE, None)
+
+    assert raw_db.execute("SELECT date, tile, gee_id FROM scenes").fetchall() == [("2026-09-21", TILE, None)]
+
+
+def test_several_scenes_without_image_can_coexist(db, raw_db):
+    db.register_scene(DAY, TILE, None)
+    db.register_scene(date(2026, 9, 22), TILE, None)
+
+    assert raw_db.execute("SELECT COUNT(*) FROM scenes").fetchone() == (2,)
+
+
+def test_registering_a_null_scene_twice_keeps_a_single_row(db, raw_db):
+    db.register_scene(DAY, TILE, None)
+    db.register_scene(DAY, TILE, None)
+
+    assert raw_db.execute("SELECT COUNT(*) FROM scenes").fetchone() == (1,)
+
+
+def test_a_null_gee_id_is_filled_when_the_image_shows_up(db, raw_db):
+    db.register_scene(DAY, TILE, None)
+
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    assert gee_id_of(raw_db) == (GEE_ID,)
+
+
+def test_a_known_gee_id_is_never_replaced_by_null(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    db.register_scene(DAY, TILE, None)
+
+    assert gee_id_of(raw_db) == (GEE_ID,)
+
+
+def test_a_known_gee_id_is_never_replaced_by_another_one(db, raw_db):
+    db.register_scene(DAY, TILE, GEE_ID)
+
+    db.register_scene(DAY, TILE, GEE_ID + "_other")
+
+    assert gee_id_of(raw_db) == (GEE_ID,)
+
+
+def test_a_scene_without_image_is_not_corrected(db, config):
+    db.register_scene(DAY, TILE, None)
+
+    assert db.is_corrected(DAY, TILE, config, ROI) is False
+
+
+def test_a_database_with_a_not_null_gee_id_is_migrated_keeping_its_data(tmp_path, config):
+    old_schema = SCHEMA_PATH.read_text(encoding="utf-8").replace(
+        "gee_id      TEXT    UNIQUE,", "gee_id      TEXT    NOT NULL UNIQUE,"
+    )
+    assert "NOT NULL UNIQUE" in old_schema, "the schema text changed: update this test"
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(old_schema)
+    old.executescript(
+        """
+        INSERT INTO scenes (id, date, tile, gee_id) VALUES (1, '2018-01-02', 'T29SPA', 'S2/A');
+        INSERT INTO scenes (id, date, tile, gee_id) VALUES (7, '2018-09-19', 'T29SPA', 'S2/B');
+        INSERT INTO corrected (scene_id, ac_version, params_hash, roi_hash, status, asset_id)
+            VALUES (7, '20231023.0', 'p', 'r', 'corrected', 'asset/b');
+        INSERT INTO errors (scene_id, date, tile, step, error_msg)
+            VALUES (1, '2018-01-02', 'T29SPA', 'load', 'old error');
+        """
+    )
+    old.commit()
+    old.close()
+    migrated_db = DBConnection(path)
+
+    raw = sqlite3.connect(path)
+    notnull = {row[1]: row[3] for row in raw.execute("PRAGMA table_info(scenes)")}
+    scenes = raw.execute("SELECT id, date, tile, gee_id FROM scenes ORDER BY id").fetchall()
+    linked = raw.execute("SELECT COUNT(*) FROM corrected c JOIN scenes s ON s.id = c.scene_id").fetchone()
+    errors = raw.execute("SELECT COUNT(*) FROM errors e JOIN scenes s ON s.id = e.scene_id").fetchone()
+    foreign_key_targets = {row[2] for row in raw.execute("PRAGMA foreign_key_list(corrected)")}
+    violations = raw.execute("PRAGMA foreign_key_check").fetchall()
+    migrated_db.register_scene(date(2018, 1, 5), "T29SPA", None)
+    next_scene = raw.execute("SELECT id, gee_id FROM scenes WHERE date = '2018-01-05'").fetchone()
+    raw.close()
+
+    assert notnull["gee_id"] == 0
+    assert scenes == [(1, "2018-01-02", "T29SPA", "S2/A"), (7, "2018-09-19", "T29SPA", "S2/B")]
+    assert linked == (1,)
+    assert errors == (1,)
+    assert foreign_key_targets == {"scenes"}
+    assert violations == []
+    assert next_scene == (8, None)  # the AUTOINCREMENT counter kept going
+
+
+def test_the_migrated_scenes_table_equals_a_new_one(tmp_path):
+    old_schema = SCHEMA_PATH.read_text(encoding="utf-8").replace(
+        "gee_id      TEXT    UNIQUE,", "gee_id      TEXT    NOT NULL UNIQUE,"
+    )
+    old_path, new_path = tmp_path / "old.db", tmp_path / "new.db"
+    old = sqlite3.connect(old_path)
+    old.executescript(old_schema)
+    old.close()
+    DBConnection(old_path)
+    DBConnection(new_path)
+
+    def describe(path):
+        connection = sqlite3.connect(path)
+        columns = connection.execute("PRAGMA table_info(scenes)").fetchall()
+        uniques = sorted(
+            tuple(info[2] for info in connection.execute(f"PRAGMA index_info({index[1]})"))
+            for index in connection.execute("PRAGMA index_list(scenes)")
+        )
+        connection.close()
+        return columns, uniques
+
+    assert describe(old_path) == describe(new_path)
+
+
+def test_opening_a_migrated_database_again_does_not_rebuild_it(tmp_path):
+    path = tmp_path / "state.db"
+    DBConnection(path).register_scene(DAY, TILE, None)
+
+    DBConnection(path)
+
+    raw = sqlite3.connect(path)
+    assert raw.execute("SELECT date, gee_id FROM scenes").fetchall() == [("2026-09-21", None)]
+    raw.close()

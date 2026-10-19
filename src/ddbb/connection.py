@@ -27,11 +27,17 @@ class DBConnection:
             connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
             self._migrate(connection)
 
-    def register_scene(self, date: date, tile: str, gee_id: str) -> None:
+    def register_scene(self, date: date, tile: str, gee_id: str | None) -> None:
+        """Record that (date, tile) was searched. gee_id is None when Earth Engine has no image.
+
+        Idempotent. A NULL gee_id is filled if an image shows up later, but a known gee_id is
+        never replaced (by NULL or by another id).
+        """
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO scenes (date, tile, gee_id) VALUES (?, ?, ?) "
-                "ON CONFLICT (date, tile) DO NOTHING",
+                "ON CONFLICT (date, tile) DO UPDATE SET gee_id = excluded.gee_id "
+                "WHERE scenes.gee_id IS NULL AND excluded.gee_id IS NOT NULL",
                 (date.isoformat(), tile, gee_id),
             )
 
@@ -103,12 +109,41 @@ class DBConnection:
                 ),
             )
 
-    @staticmethod
-    def _migrate(connection: sqlite3.Connection) -> None:
-        """CREATE TABLE IF NOT EXISTS never alters a table: add the columns older databases lack."""
+    @classmethod
+    def _migrate(cls, connection: sqlite3.Connection) -> None:
+        """CREATE TABLE IF NOT EXISTS never alters a table: bring older databases up to date."""
         columns = {row[1] for row in connection.execute("PRAGMA table_info(errors)")}
         if "traceback" not in columns:
             connection.execute("ALTER TABLE errors ADD COLUMN traceback TEXT")
+        cls._make_gee_id_nullable(connection)
+
+    @staticmethod
+    def _make_gee_id_nullable(connection: sqlite3.Connection) -> None:
+        """SQLite cannot drop a NOT NULL: rebuild `scenes` as SQLite documents (foreign keys off)."""
+        columns = list(connection.execute("PRAGMA table_info(scenes)"))
+        gee_id = next(row for row in columns if row[1] == "gee_id")
+        if gee_id[3] == 0:  # already nullable
+            return
+
+        # The new DDL comes from schema.sql itself, so it is never duplicated here.
+        fresh = sqlite3.connect(":memory:")
+        fresh.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        scenes_sql = fresh.execute("SELECT sql FROM sqlite_master WHERE name = 'scenes'").fetchone()[0]
+        fresh.close()
+
+        names = ", ".join(row[1] for row in columns)
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.executescript(
+                "BEGIN;"
+                + scenes_sql.replace("CREATE TABLE scenes", "CREATE TABLE scenes_new", 1)
+                + f"; INSERT INTO scenes_new ({names}) SELECT {names} FROM scenes;"
+                + "DROP TABLE scenes;"
+                + "ALTER TABLE scenes_new RENAME TO scenes;"
+                + "COMMIT;"
+            )
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

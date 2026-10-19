@@ -11,12 +11,16 @@
 --   * Dates are stored as ISO-8601 TEXT (YYYY-MM-DD); timestamps as UTC ISO-8601 TEXT.
 --   * `IS NOT` is used instead of `IS DISTINCT FROM` so the schema works on SQLite < 3.39.
 
--- One row per Sentinel-2 scene found through GEE. `date` is a plain YYYY-MM-DD date, never a datetime.
+-- One row per (date, tile) that was searched in GEE. `date` is a plain YYYY-MM-DD date, never a datetime.
+--   no row          -> that date and tile were never searched
+--   gee_id IS NULL  -> searched, and Earth Engine has no image for it
+--   gee_id NOT NULL -> searched, and this is the image that was found
+-- (UNIQUE allows many NULLs, so many dates without image can coexist.)
 CREATE TABLE IF NOT EXISTS scenes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT    NOT NULL CHECK (date(date) IS date),
     tile        TEXT    NOT NULL,
-    gee_id      TEXT    NOT NULL UNIQUE,
+    gee_id      TEXT    UNIQUE,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     -- Sentinel-2 L1C normally has one image per day and tile.
     UNIQUE (date, tile)
